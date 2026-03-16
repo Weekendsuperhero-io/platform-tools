@@ -166,6 +166,22 @@ Each entry is sent directly to GitHub's repository rulesets API. The CLI upserts
 
 That means you can keep the GitHub-native ruleset payload shape in JSON without inventing another DSL.
 
+If you want admins to be able to bypass a ruleset, include `bypass_actors`. The sample config now grants organization admins an always-on bypass:
+
+```json
+{
+  "bypass_actors": [
+    {
+      "actor_id": null,
+      "actor_type": "OrganizationAdmin",
+      "bypass_mode": "always"
+    }
+  ]
+}
+```
+
+On organization-owned repositories, GitHub's ruleset docs list repository admins, organization owners, and enterprise owners as eligible bypass actors, and the REST rules API exposes `OrganizationAdmin` as a supported `actor_type`. If you want admins to bypass only through pull requests, use `bypass_mode: "pull_request"` instead. Sources: [rulesets UI docs](https://docs.github.com/en/organizations/managing-organization-settings/creating-rulesets-for-repositories-in-your-organization), [repo rules REST API](https://docs.github.com/rest/repos/rules).
+
 ### `repository.security`
 
 The CLI can also enable a few repository security features directly:
