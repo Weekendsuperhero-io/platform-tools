@@ -1,0 +1,191 @@
+# GitHub Repository Baseline
+
+This repo contains a small TypeScript CLI for applying a default GitHub repository baseline:
+
+- default branch normalization to `main`
+- repository settings such as merge strategy, branch cleanup, wiki/projects/issues
+- repository topics
+- free repository security defaults such as Dependabot and public-repo code scanning
+- repository rulesets
+- organization-wide repo selection for bulk rollout
+
+The tool uses Octokit, GitHub's official Node client. It works with GitHub.com and GitHub Enterprise Cloud as long as your token has the required admin permissions.
+
+## Files
+
+- `config/baseline.example.json`: sample baseline definition
+- `src/apply-github-baseline.ts`: typed CLI source
+- `package.json`: build and run scripts
+
+## Setup
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Build:
+
+```bash
+npm run build
+```
+
+## Usage
+
+Dry run a single repo:
+
+```bash
+npm run apply:baseline -- \
+  --config config/baseline.example.json \
+  --repo your-org/your-repo \
+  --dry-run
+```
+
+Apply to a single repo:
+
+```bash
+npm run apply:baseline -- \
+  --config config/baseline.example.json \
+  --repo your-org/your-repo
+```
+
+Apply to a list of repos:
+
+```bash
+npm run apply:baseline -- \
+  --config config/baseline.example.json \
+  --repos-file repos.txt
+```
+
+Apply to every non-archived, non-disabled, non-fork, non-template repo in an org:
+
+```bash
+npm run apply:baseline -- \
+  --config config/baseline.example.json \
+  --org your-org
+```
+
+Filter the org run with a regex:
+
+```bash
+npm run apply:baseline -- \
+  --config config/baseline.example.json \
+  --org your-org \
+  --match '^platform-|^service-'
+```
+
+## Auth
+
+Set `GITHUB_TOKEN` or `GH_TOKEN` before applying for real. As a local fallback, the CLI also tries `gh auth token`.
+
+If `npm` or your non-interactive shell does not see the same `PATH` as your login shell, set `GH_PATH` explicitly:
+
+```bash
+export GH_PATH="$(command -v gh)"
+```
+
+The CLI checks for `gh` in this order:
+
+- `GH_PATH`
+- `gh` from `PATH`
+- common install locations such as `/opt/homebrew/bin/gh` and `/usr/local/bin/gh`
+
+If you are managing organization-owned repositories, use an account or token that can edit repository settings and rulesets.
+
+## Baseline Format
+
+The JSON file has three top-level sections:
+
+```json
+{
+  "apiVersion": "2026-03-10",
+  "repository": {
+    "settings": {
+      "allow_squash_merge": true,
+      "allow_merge_commit": false
+    },
+    "topics": ["managed", "baseline"]
+  },
+  "rulesets": []
+}
+```
+
+### `repository.settings`
+
+This object is passed to `PATCH /repos/{owner}/{repo}`. Keep it to fields supported by GitHub's "Update a repository" endpoint, such as:
+
+- `allow_squash_merge`
+- `allow_merge_commit`
+- `allow_rebase_merge`
+- `allow_auto_merge`
+- `allow_update_branch`
+- `delete_branch_on_merge`
+- `has_issues`
+- `has_projects`
+- `has_wiki`
+- `squash_merge_commit_title`
+- `squash_merge_commit_message`
+
+Avoid setting `default_branch` unless you know the target branch already exists on every repo you will touch.
+
+### `repository.default_branch`
+
+Use this when you want the CLI to normalize every repository to the same default branch name.
+
+Example:
+
+```json
+{
+  "default_branch": {
+    "name": "main",
+    "rename_existing": true
+  }
+}
+```
+
+Behavior:
+
+- if the repository already has `main`, the CLI switches the default branch to `main`
+- if the repository does not have `main` and `rename_existing` is `true`, the CLI renames the current default branch to `main`
+- if the repository does not have `main` and `rename_existing` is `false`, the CLI stops with an error
+
+### `repository.topics`
+
+If present, topics are replaced via `PUT /repos/{owner}/{repo}/topics`.
+
+### `rulesets`
+
+Each entry is sent directly to GitHub's repository rulesets API. The CLI upserts by `(name, target)`:
+
+- if a matching ruleset exists, it updates it
+- otherwise it creates it
+
+That means you can keep the GitHub-native ruleset payload shape in JSON without inventing another DSL.
+
+### `repository.security`
+
+The CLI can also enable a few repository security features directly:
+
+- `vulnerability_alerts`
+- `dependabot_security_updates`
+- `code_scanning_default_setup`
+
+For `code_scanning_default_setup`, the sample config uses `mode: "public-only"` so public repositories get GitHub's default code scanning setup, while private and internal repos are skipped unless you explicitly opt into a broader mode.
+
+## Recommended First Pass
+
+Start with one baseline ruleset on `~DEFAULT_BRANCH` and a small repository settings block. Once that is stable, add:
+
+- required status checks
+- required workflows
+- code scanning gates
+- repo-specific topics or labels in a second tool
+
+## Notes
+
+- This tool does not delete unmanaged rulesets.
+- This tool does not create repositories.
+- This tool does not yet manage labels, collaborators, teams, branch environments, or workflow files.
+
+Those are reasonable next steps once the baseline shape is stable.

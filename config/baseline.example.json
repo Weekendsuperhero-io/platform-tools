@@ -1,0 +1,73 @@
+{
+  "apiVersion": "2026-03-10",
+  "repository": {
+    "default_branch": {
+      "name": "main",
+      "rename_existing": true
+    },
+    "settings": {
+      "allow_auto_merge": true,
+      "allow_merge_commit": false,
+      "allow_rebase_merge": false,
+      "allow_squash_merge": true,
+      "allow_update_branch": true,
+      "delete_branch_on_merge": true,
+      "has_issues": true,
+      "has_projects": false,
+      "has_wiki": true,
+      "squash_merge_commit_message": "PR_BODY",
+      "squash_merge_commit_title": "PR_TITLE"
+    },
+    "topics": [
+      "managed-by-baseline"
+    ],
+    "security": {
+      "vulnerability_alerts": true,
+      "dependabot_security_updates": true,
+      "code_scanning_default_setup": {
+        "state": "configured",
+        "query_suite": "default",
+        "mode": "public-only"
+      }
+    }
+  },
+  "rulesets": [
+    {
+      "name": "Default branch protection",
+      "target": "branch",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "include": [
+            "~DEFAULT_BRANCH"
+          ],
+          "exclude": []
+        }
+      },
+      "rules": [
+        {
+          "type": "deletion"
+        },
+        {
+          "type": "non_fast_forward"
+        },
+        {
+          "type": "required_linear_history"
+        },
+        {
+          "type": "pull_request",
+          "parameters": {
+            "allowed_merge_methods": [
+              "squash"
+            ],
+            "dismiss_stale_reviews_on_push": true,
+            "require_code_owner_review": true,
+            "require_last_push_approval": true,
+            "required_approving_review_count": 1,
+            "required_review_thread_resolution": true
+          }
+        }
+      ]
+    }
+  ]
+}
