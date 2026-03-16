@@ -27,7 +27,7 @@
       "code_scanning_default_setup": {
         "state": "configured",
         "query_suite": "default",
-        "mode": "public-only"
+        "mode": "eligible"
       }
     }
   },

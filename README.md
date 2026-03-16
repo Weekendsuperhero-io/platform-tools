@@ -11,6 +11,8 @@ This repo contains a small TypeScript CLI for applying a default GitHub reposito
 
 The tool uses Octokit, GitHub's official Node client. It works with GitHub.com and GitHub Enterprise Cloud as long as your token has the required admin permissions.
 
+This repo uses `pnpm` and explicitly rejects `npm`.
+
 ## Files
 
 - `config/baseline.example.json`: sample baseline definition
@@ -22,13 +24,13 @@ The tool uses Octokit, GitHub's official Node client. It works with GitHub.com a
 Install dependencies:
 
 ```bash
-npm install
+pnpm install
 ```
 
 Build:
 
 ```bash
-npm run build
+pnpm run build
 ```
 
 ## Usage
@@ -36,7 +38,7 @@ npm run build
 Dry run a single repo:
 
 ```bash
-npm run apply:baseline -- \
+pnpm run apply:baseline -- \
   --config config/baseline.example.json \
   --repo your-org/your-repo \
   --dry-run
@@ -45,7 +47,7 @@ npm run apply:baseline -- \
 Apply to a single repo:
 
 ```bash
-npm run apply:baseline -- \
+pnpm run apply:baseline -- \
   --config config/baseline.example.json \
   --repo your-org/your-repo
 ```
@@ -53,7 +55,7 @@ npm run apply:baseline -- \
 Apply to a list of repos:
 
 ```bash
-npm run apply:baseline -- \
+pnpm run apply:baseline -- \
   --config config/baseline.example.json \
   --repos-file repos.txt
 ```
@@ -61,7 +63,7 @@ npm run apply:baseline -- \
 Apply to every non-archived, non-disabled, non-fork, non-template repo in an org:
 
 ```bash
-npm run apply:baseline -- \
+pnpm run apply:baseline -- \
   --config config/baseline.example.json \
   --org your-org
 ```
@@ -69,7 +71,7 @@ npm run apply:baseline -- \
 Filter the org run with a regex:
 
 ```bash
-npm run apply:baseline -- \
+pnpm run apply:baseline -- \
   --config config/baseline.example.json \
   --org your-org \
   --match '^platform-|^service-'
@@ -79,7 +81,7 @@ npm run apply:baseline -- \
 
 Set `GITHUB_TOKEN` or `GH_TOKEN` before applying for real. As a local fallback, the CLI also tries `gh auth token`.
 
-If `npm` or your non-interactive shell does not see the same `PATH` as your login shell, set `GH_PATH` explicitly:
+If your non-interactive shell does not see the same `PATH` as your login shell, set `GH_PATH` explicitly:
 
 ```bash
 export GH_PATH="$(command -v gh)"
@@ -149,6 +151,7 @@ Behavior:
 - if the repository already has `main`, the CLI switches the default branch to `main`
 - if the repository does not have `main` and `rename_existing` is `true`, the CLI renames the current default branch to `main`
 - if the repository does not have `main` and `rename_existing` is `false`, the CLI stops with an error
+- if the repository is empty, the CLI skips default-branch normalization until the first push exists
 
 ### `repository.topics`
 
@@ -171,7 +174,7 @@ The CLI can also enable a few repository security features directly:
 - `dependabot_security_updates`
 - `code_scanning_default_setup`
 
-For `code_scanning_default_setup`, the sample config uses `mode: "public-only"` so public repositories get GitHub's default code scanning setup, while private and internal repos are skipped unless you explicitly opt into a broader mode.
+For `code_scanning_default_setup`, the sample config uses `mode: "eligible"` so the CLI attempts code scanning setup for any repo GitHub says is eligible. If GitHub rejects it for licensing or availability reasons, the CLI logs a skip and continues.
 
 ## Recommended First Pass
 

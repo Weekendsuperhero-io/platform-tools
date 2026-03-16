@@ -150,6 +150,7 @@ interface RepoMetadata {
   visibility: "public" | "private" | "internal" | undefined;
   archived: boolean;
   disabled: boolean;
+  is_empty: boolean;
 }
 
 async function main(): Promise<void> {
@@ -464,9 +465,6 @@ async function applyBaselineToRepo(options: {
   }
 
   const repositorySettings = { ...(config.repository?.settings ?? {}) };
-  if (config.repository?.default_branch?.name) {
-    repositorySettings.default_branch = config.repository.default_branch.name;
-  }
 
   if (Object.keys(repositorySettings).length > 0) {
     await callApi({
@@ -564,7 +562,8 @@ async function getRepositoryMetadata(options: {
     default_branch: response.data.default_branch ?? undefined,
     visibility: (response.data.visibility as RepoMetadata["visibility"]) ?? undefined,
     archived: response.data.archived ?? false,
-    disabled: response.data.disabled ?? false
+    disabled: response.data.disabled ?? false,
+    is_empty: response.data.pushed_at === null || (response.data.size ?? 0) === 0
   };
 }
 
@@ -580,6 +579,11 @@ async function ensureDefaultBranch(options: {
   const { owner, repo, desired, metadata, apiVersion, dryRun, octokit } = options;
   const desiredName = desired.name;
   const currentDefaultBranch = metadata?.default_branch;
+
+  if (metadata?.is_empty) {
+    console.log(`Skip default branch normalization: ${owner}/${repo} is empty`);
+    return;
+  }
 
   if (!currentDefaultBranch || currentDefaultBranch === desiredName) {
     return;
@@ -680,7 +684,7 @@ async function applyRepositorySecurity(options: {
   }
 
   if (security.code_scanning_default_setup?.state === "configured") {
-    const mode = security.code_scanning_default_setup.mode ?? "public-only";
+    const mode = security.code_scanning_default_setup.mode ?? "eligible";
     const visibility = metadata?.visibility;
 
     if (mode === "public-only" && visibility && visibility !== "public") {
@@ -688,21 +692,29 @@ async function applyRepositorySecurity(options: {
       return;
     }
 
-    await callApi({
-      method: "PATCH",
-      endpoint: "PATCH /repos/{owner}/{repo}/code-scanning/default-setup",
-      routeParams: { owner, repo },
-      payload: {
-        state: "configured",
-        ...(security.code_scanning_default_setup.query_suite
-          ? { query_suite: security.code_scanning_default_setup.query_suite }
-          : {})
-      },
-      apiVersion,
-      dryRun,
-      label: "Configure code scanning default setup",
-      octokit
-    });
+    try {
+      await callApi({
+        method: "PATCH",
+        endpoint: "PATCH /repos/{owner}/{repo}/code-scanning/default-setup",
+        routeParams: { owner, repo },
+        payload: {
+          state: "configured",
+          ...(security.code_scanning_default_setup.query_suite
+            ? { query_suite: security.code_scanning_default_setup.query_suite }
+            : {})
+        },
+        apiVersion,
+        dryRun,
+        label: "Configure code scanning default setup",
+        octokit
+      });
+    } catch (error: unknown) {
+      if (isHttpError(error, 403) || isHttpError(error, 422)) {
+        console.log(`Skip code scanning default setup: ${getErrorMessage(error)}`);
+        return;
+      }
+      throw error;
+    }
   }
 }
 
@@ -820,6 +832,10 @@ function isHttpError(error: unknown, status: number): boolean {
 
   const errorWithStatus = error as Error & { status?: number };
   return errorWithStatus.status === status;
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 main().catch((error: unknown) => {
