@@ -7,9 +7,9 @@ import { Octokit } from "octokit";
 
 const HELP_TEXT = `
 Usage:
-  npm run apply:baseline -- --config <file> --repo <owner/name> [--dry-run]
-  npm run apply:baseline -- --config <file> --repos-file <file> [--dry-run]
-  npm run apply:baseline -- --config <file> --org <org> [--match <regex>] [--dry-run]
+  pnpm run apply:baseline -- --config <file> --repo <owner/name> [--dry-run] [--concurrency <n>]
+  pnpm run apply:baseline -- --config <file> --repos-file <file> [--dry-run] [--concurrency <n>]
+  pnpm run apply:baseline -- --config <file> --org <org> [--match <regex>] [--dry-run] [--concurrency <n>]
 
 Options:
   --config <file>      Path to the baseline JSON file
@@ -17,6 +17,7 @@ Options:
   --repos-file <file>  File containing owner/name values, one per line
   --org <org>          Apply to all eligible repositories in the organization
   --match <regex>      Filter org repositories by nameWithOwner
+  --concurrency <n>    Number of repositories to process at once (default: 4)
   --dry-run            Print planned API calls without executing them
   --help               Show this help text
 `.trim();
@@ -102,6 +103,7 @@ interface CodeScanningDefaultSetupConfig {
 }
 
 interface SecurityConfig {
+  code_security?: boolean;
   vulnerability_alerts?: boolean;
   dependabot_security_updates?: boolean;
   code_scanning_default_setup?: CodeScanningDefaultSetupConfig;
@@ -126,6 +128,7 @@ interface CliArgs {
   reposFile: string | null;
   org: string | null;
   match: string | null;
+  concurrency: number;
   dryRun: boolean;
   help: boolean;
 }
@@ -152,6 +155,14 @@ interface RepoMetadata {
   disabled: boolean;
   is_empty: boolean;
 }
+
+interface RepoRunResult {
+  repo: string;
+  success: boolean;
+  error?: string;
+}
+
+type LogFn = (message: string) => void;
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -181,10 +192,27 @@ async function main(): Promise<void> {
 
   console.log(`Using config: ${configPath}`);
   console.log(`Target repositories: ${targets.length}`);
+  console.log(`Concurrency: ${args.concurrency}`);
 
-  for (const repo of targets) {
-    console.log(`\n==> ${repo}`);
-    await applyBaselineToRepo({ repo, config, dryRun: args.dryRun, octokit });
+  const results = await runWithConcurrency(targets, args.concurrency, async (repo) => {
+    const logger = createRepoLogger(repo);
+
+    try {
+      await applyBaselineToRepo({ repo, config, dryRun: args.dryRun, octokit, log: logger.log });
+      logger.flush();
+      return { repo, success: true } satisfies RepoRunResult;
+    } catch (error: unknown) {
+      logger.log(`ERROR: ${getErrorMessage(error)}`);
+      logger.flush();
+      return { repo, success: false, error: getErrorMessage(error) } satisfies RepoRunResult;
+    }
+  });
+
+  const failures = results.filter((result) => !result.success);
+  if (failures.length > 0) {
+    throw new Error(
+      `Baseline run finished with ${failures.length} failed repos: ${failures.map((result) => result.repo).join(", ")}`
+    );
   }
 }
 
@@ -195,6 +223,7 @@ function parseArgs(argv: string[]): CliArgs {
     reposFile: null,
     org: null,
     match: null,
+    concurrency: 4,
     dryRun: false,
     help: false
   };
@@ -217,6 +246,9 @@ function parseArgs(argv: string[]): CliArgs {
       case "--match":
         args.match = requireValue(argv, ++index, "--match");
         break;
+      case "--concurrency":
+        args.concurrency = parseConcurrency(requireValue(argv, ++index, "--concurrency"));
+        break;
       case "--dry-run":
         args.dryRun = true;
         break;
@@ -230,6 +262,14 @@ function parseArgs(argv: string[]): CliArgs {
   }
 
   return args;
+}
+
+function parseConcurrency(value: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`Invalid concurrency value: ${value}`);
+  }
+  return parsed;
 }
 
 function requireValue(argv: string[], index: number, flag: string): string {
@@ -440,8 +480,9 @@ async function applyBaselineToRepo(options: {
   config: BaselineConfig;
   dryRun: boolean;
   octokit: Octokit | null;
+  log: LogFn;
 }): Promise<void> {
-  const { repo, config, dryRun, octokit } = options;
+  const { repo, config, dryRun, octokit, log } = options;
   const [owner, name] = repo.split("/");
 
   if (!owner || !name) {
@@ -460,7 +501,8 @@ async function applyBaselineToRepo(options: {
       metadata,
       apiVersion: config.apiVersion,
       dryRun,
-      octokit
+      octokit,
+      log
     });
   }
 
@@ -475,7 +517,8 @@ async function applyBaselineToRepo(options: {
       apiVersion: config.apiVersion,
       dryRun,
       label: "Update repository settings",
-      octokit
+      octokit,
+      log
     });
   }
 
@@ -488,7 +531,8 @@ async function applyBaselineToRepo(options: {
       apiVersion: config.apiVersion,
       dryRun,
       label: "Replace repository topics",
-      octokit
+      octokit,
+      log
     });
   }
 
@@ -500,7 +544,8 @@ async function applyBaselineToRepo(options: {
       metadata,
       apiVersion: config.apiVersion,
       dryRun,
-      octokit
+      octokit,
+      log
     });
   }
 
@@ -530,7 +575,8 @@ async function applyBaselineToRepo(options: {
           apiVersion: config.apiVersion,
           dryRun,
           label: `Update ruleset "${rulesetName}"`,
-          octokit
+          octokit,
+          log
         });
       } else {
         await callApi({
@@ -541,7 +587,8 @@ async function applyBaselineToRepo(options: {
           apiVersion: config.apiVersion,
           dryRun,
           label: `Create ruleset "${rulesetName}"`,
-          octokit
+          octokit,
+          log
         });
       }
     }
@@ -575,13 +622,14 @@ async function ensureDefaultBranch(options: {
   apiVersion: string;
   dryRun: boolean;
   octokit: Octokit | null;
+  log: LogFn;
 }): Promise<void> {
-  const { owner, repo, desired, metadata, apiVersion, dryRun, octokit } = options;
+  const { owner, repo, desired, metadata, apiVersion, dryRun, octokit, log } = options;
   const desiredName = desired.name;
   const currentDefaultBranch = metadata?.default_branch;
 
   if (metadata?.is_empty) {
-    console.log(`Skip default branch normalization: ${owner}/${repo} is empty`);
+    log(`Skip default branch normalization: ${owner}/${repo} is empty`);
     return;
   }
 
@@ -602,7 +650,8 @@ async function ensureDefaultBranch(options: {
       apiVersion,
       dryRun,
       label: `Switch default branch to "${desiredName}"`,
-      octokit
+      octokit,
+      log
     });
     return;
   }
@@ -621,7 +670,8 @@ async function ensureDefaultBranch(options: {
     apiVersion,
     dryRun,
     label: `Rename default branch "${currentDefaultBranch}" to "${desiredName}"`,
-    octokit
+    octokit,
+    log
   });
 }
 
@@ -654,8 +704,37 @@ async function applyRepositorySecurity(options: {
   apiVersion: string;
   dryRun: boolean;
   octokit: Octokit | null;
+  log: LogFn;
 }): Promise<void> {
-  const { owner, repo, security, metadata, apiVersion, dryRun, octokit } = options;
+  const { owner, repo, security, metadata, apiVersion, dryRun, octokit, log } = options;
+
+  if (security.code_security) {
+    try {
+      await callApi({
+        method: "PATCH",
+        endpoint: "PATCH /repos/{owner}/{repo}",
+        routeParams: { owner, repo },
+        payload: {
+          security_and_analysis: {
+            code_security: {
+              status: "enabled"
+            }
+          }
+        },
+        apiVersion,
+        dryRun,
+        label: "Enable GitHub Code Security",
+        octokit,
+        log
+      });
+    } catch (error: unknown) {
+      if (isHttpError(error, 403) || isHttpError(error, 422)) {
+        log(`Skip enabling GitHub Code Security: ${getErrorMessage(error)}`);
+      } else {
+        throw error;
+      }
+    }
+  }
 
   if (security.vulnerability_alerts) {
     await callApi({
@@ -666,7 +745,8 @@ async function applyRepositorySecurity(options: {
       apiVersion,
       dryRun,
       label: "Enable vulnerability alerts and dependency graph",
-      octokit
+      octokit,
+      log
     });
   }
 
@@ -679,7 +759,8 @@ async function applyRepositorySecurity(options: {
       apiVersion,
       dryRun,
       label: "Enable Dependabot security updates",
-      octokit
+      octokit,
+      log
     });
   }
 
@@ -688,7 +769,7 @@ async function applyRepositorySecurity(options: {
     const visibility = metadata?.visibility;
 
     if (mode === "public-only" && visibility && visibility !== "public") {
-      console.log("Skip code scanning default setup: repository is not public");
+      log("Skip code scanning default setup: repository is not public");
       return;
     }
 
@@ -706,11 +787,12 @@ async function applyRepositorySecurity(options: {
         apiVersion,
         dryRun,
         label: "Configure code scanning default setup",
-        octokit
+        octokit,
+        log
       });
     } catch (error: unknown) {
       if (isHttpError(error, 403) || isHttpError(error, 422)) {
-        console.log(`Skip code scanning default setup: ${getErrorMessage(error)}`);
+        log(`Skip code scanning default setup: ${getErrorMessage(error)}`);
         return;
       }
       throw error;
@@ -733,6 +815,7 @@ async function getRepositoryRulesets(options: {
     dryRun: false,
     label: "Fetch repository rulesets",
     octokit: options.octokit,
+    log: () => {},
     quiet: true
   });
 
@@ -767,16 +850,17 @@ async function callApi(options: {
   dryRun: boolean;
   label: string;
   octokit: Octokit | null;
+  log: LogFn;
   quiet?: boolean;
 }): Promise<unknown> {
-  const { method, endpoint, routeParams, payload, apiVersion, dryRun, label, octokit, quiet = false } = options;
+  const { method, endpoint, routeParams, payload, apiVersion, dryRun, label, octokit, log, quiet = false } = options;
 
   if (dryRun) {
     if (!quiet) {
-      console.log(`[dry-run] ${label}`);
-      console.log(`  ${method} ${renderEndpoint(endpoint, routeParams)}`);
+      log(`[dry-run] ${label}`);
+      log(`  ${method} ${renderEndpoint(endpoint, routeParams)}`);
       if (payload) {
-        console.log(indentJson(payload, 2));
+        log(indentJson(payload, 2));
       }
     }
     return null;
@@ -787,7 +871,7 @@ async function callApi(options: {
   }
 
   if (!quiet) {
-    console.log(label);
+    log(label);
   }
 
   const response = await octokit.request(endpoint, {
@@ -836,6 +920,48 @@ function isHttpError(error: unknown, status: number): boolean {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function createRepoLogger(repo: string): { log: LogFn; flush: () => void } {
+  const lines: string[] = [];
+
+  return {
+    log: (message: string) => {
+      lines.push(message);
+    },
+    flush: () => {
+      console.log(`\n==> ${repo}`);
+      for (const line of lines) {
+        console.log(line);
+      }
+    }
+  };
+}
+
+async function runWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  async function runWorker(): Promise<void> {
+    while (true) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+
+      if (currentIndex >= items.length) {
+        return;
+      }
+
+      results[currentIndex] = await worker(items[currentIndex]!, currentIndex);
+    }
+  }
+
+  const workerCount = Math.min(concurrency, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+  return results;
 }
 
 main().catch((error: unknown) => {

@@ -22,6 +22,7 @@
       "managed-by-baseline"
     ],
     "security": {
+      "code_security": true,
       "vulnerability_alerts": true,
       "dependabot_security_updates": true,
       "code_scanning_default_setup": {

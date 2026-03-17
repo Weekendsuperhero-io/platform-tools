@@ -68,6 +68,15 @@ pnpm run apply:baseline -- \
   --org your-org
 ```
 
+Control parallelism explicitly:
+
+```bash
+pnpm run apply:baseline -- \
+  --config config/baseline.example.json \
+  --org your-org \
+  --concurrency 6
+```
+
 Filter the org run with a regex:
 
 ```bash
@@ -76,6 +85,8 @@ pnpm run apply:baseline -- \
   --org your-org \
   --match '^platform-|^service-'
 ```
+
+By default, the CLI processes up to 4 repositories at a time and prints each repo's logs as a grouped block when that repo finishes.
 
 ## Auth
 
@@ -186,11 +197,12 @@ On organization-owned repositories, GitHub's ruleset docs list repository admins
 
 The CLI can also enable a few repository security features directly:
 
+- `code_security`
 - `vulnerability_alerts`
 - `dependabot_security_updates`
 - `code_scanning_default_setup`
 
-For `code_scanning_default_setup`, the sample config uses `mode: "eligible"` so the CLI attempts code scanning setup for any repo GitHub says is eligible. If GitHub rejects it for licensing or availability reasons, the CLI logs a skip and continues.
+The sample config enables `code_security` before `code_scanning_default_setup`, because GitHub's current prerequisite for default setup is that GitHub Actions are enabled and the repository is either public or has GitHub Code Security enabled. If GitHub rejects `code_security` or default setup for licensing or availability reasons, the CLI logs a skip and continues.
 
 ## Recommended First Pass
 
