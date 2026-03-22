@@ -12,7 +12,9 @@
 		"preinstall": "node scripts/enforce-pnpm.cjs",
 		"build": "node scripts/enforce-pnpm.cjs && tsc -p tsconfig.json",
 		"check": "node scripts/enforce-pnpm.cjs && tsc -p tsconfig.json --noEmit",
-		"apply:baseline": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js"
+		"apply:baseline": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js",
+		"apply:low-cost": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/security-low-cost.json",
+		"apply": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/security-low-cost.json"
 	},
 	"dependencies": {
 		"octokit": "^5.0.5"

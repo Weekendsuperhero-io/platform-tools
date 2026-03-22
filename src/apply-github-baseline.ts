@@ -205,20 +205,32 @@ async function main(): Promise<void> {
     throw new Error("No target repositories resolved");
   }
 
+  const totalTargets = targets.length;
+  let completedTargets = 0;
+
   console.log(`Using config: ${configPath}`);
-  console.log(`Target repositories: ${targets.length}`);
+  console.log(`Target repositories: ${totalTargets}`);
   console.log(`Concurrency: ${args.concurrency}`);
 
-  const results = await runWithConcurrency(targets, args.concurrency, async (repo) => {
+  const results = await runWithConcurrency(targets, args.concurrency, async (repo, index) => {
+    const startAt = Date.now();
+    console.log(`[start ${index + 1}/${totalTargets}] ${repo}`);
+
     const logger = createRepoLogger(repo);
 
     try {
       await applyBaselineToRepo({ repo, config, dryRun: args.dryRun, octokit, log: logger.log });
       logger.flush();
+      completedTargets += 1;
+      const elapsedSec = ((Date.now() - startAt) / 1000).toFixed(1);
+      console.log(`[done ${completedTargets}/${totalTargets}] ${repo} success (${elapsedSec}s)`);
       return { repo, success: true } satisfies RepoRunResult;
     } catch (error: unknown) {
       logger.log(`ERROR: ${getErrorMessage(error)}`);
       logger.flush();
+      completedTargets += 1;
+      const elapsedSec = ((Date.now() - startAt) / 1000).toFixed(1);
+      console.log(`[done ${completedTargets}/${totalTargets}] ${repo} failed (${elapsedSec}s)`);
       return { repo, success: false, error: getErrorMessage(error) } satisfies RepoRunResult;
     }
   });
@@ -246,6 +258,8 @@ function parseArgs(argv: string[]): CliArgs {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     switch (arg) {
+      case "--":
+        break;
       case "--config":
         args.configPath = requireValue(argv, ++index, "--config");
         break;

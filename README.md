@@ -36,6 +36,14 @@ pnpm run build
 
 ## Usage
 
+Default low-cost profile:
+
+```bash
+pnpm run apply -- --org your-org
+```
+
+The `apply` script uses `config/security-low-cost.json` by default.
+
 Dry run a single repo:
 
 ```bash
@@ -72,9 +80,7 @@ pnpm run apply:baseline -- \
 Apply the low-cost security profile org-wide:
 
 ```bash
-pnpm run apply:baseline -- \
-  --config config/security-low-cost.json \
-  --org your-org
+pnpm run apply -- --org your-org
 ```
 
 Control parallelism explicitly:
@@ -96,6 +102,7 @@ pnpm run apply:baseline -- \
 ```
 
 By default, the CLI processes up to 4 repositories at a time and prints each repo's logs as a grouped block when that repo finishes.
+It also prints live progress lines (`[start ...]` / `[done ...]`) as repositories begin and complete.
 
 ## Auth
 
