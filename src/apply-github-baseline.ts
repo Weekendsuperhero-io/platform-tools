@@ -119,6 +119,7 @@ interface RepositoryConfig {
 interface BaselineConfig {
   apiVersion: string;
   repository?: RepositoryConfig;
+  orgRulesets?: JsonObject[];
   rulesets?: JsonObject[];
 }
 
@@ -184,7 +185,21 @@ async function main(): Promise<void> {
   const config = parseJsonFile<BaselineConfig>(configPath, "config");
   validateConfig(config, configPath);
 
-  const octokit = createOctokit(args.dryRun);
+  const octokit = createOctokit(args.dryRun, config.apiVersion);
+  await runAuthPreflight({ args, config, octokit });
+  if (Array.isArray(config.orgRulesets) && config.orgRulesets.length > 0 && !args.org) {
+    throw new Error("Config contains orgRulesets but --org was not provided");
+  }
+
+  if (args.org && Array.isArray(config.orgRulesets) && config.orgRulesets.length > 0) {
+    await applyOrganizationRulesets({
+      org: args.org,
+      config,
+      dryRun: args.dryRun,
+      octokit
+    });
+  }
+
   const targets = await resolveTargets(args, octokit);
   if (targets.length === 0) {
     throw new Error("No target repositories resolved");
@@ -319,9 +334,73 @@ function validateConfig(config: BaselineConfig, configPath: string): void {
   if (config.rulesets && !Array.isArray(config.rulesets)) {
     throw new Error("rulesets must be an array");
   }
+
+  if (config.orgRulesets && !Array.isArray(config.orgRulesets)) {
+    throw new Error("orgRulesets must be an array");
+  }
 }
 
-function createOctokit(dryRun: boolean): Octokit | null {
+async function applyOrganizationRulesets(options: {
+  org: string;
+  config: BaselineConfig;
+  dryRun: boolean;
+  octokit: Octokit | null;
+}): Promise<void> {
+  const { org, config, dryRun, octokit } = options;
+  const logger = createSectionLogger(`Organization rulesets (${org})`);
+  const desiredRulesets = config.orgRulesets ?? [];
+
+  const existingRulesets: ExistingRuleset[] = dryRun || !octokit
+    ? []
+    : await getOrganizationRulesets({ org, apiVersion: config.apiVersion, octokit });
+
+  for (const desiredRuleset of desiredRulesets) {
+    validateRuleset(desiredRuleset);
+
+    const desiredTarget = getString(desiredRuleset.target) ?? "branch";
+    const rulesetName = getRequiredString(desiredRuleset.name, "orgRulesets[].name");
+    const existing = existingRulesets.find(
+      (ruleset) =>
+        ruleset.name === rulesetName &&
+        (ruleset.target ?? "branch") === desiredTarget &&
+        (ruleset.source_type === undefined || ruleset.source_type === "Organization")
+    );
+
+    try {
+      if (existing) {
+        await callApi({
+          method: "PUT",
+          endpoint: "PUT /orgs/{org}/rulesets/{ruleset_id}",
+          routeParams: { org, ruleset_id: existing.id },
+          payload: desiredRuleset,
+          apiVersion: config.apiVersion,
+          dryRun,
+          label: `Update org ruleset "${rulesetName}"`,
+          octokit,
+          log: logger.log
+        });
+      } else {
+        await callApi({
+          method: "POST",
+          endpoint: "POST /orgs/{org}/rulesets",
+          routeParams: { org },
+          payload: desiredRuleset,
+          apiVersion: config.apiVersion,
+          dryRun,
+          label: `Create org ruleset "${rulesetName}"`,
+          octokit,
+          log: logger.log
+        });
+      }
+    } catch (error: unknown) {
+      throw orgRulesetErrorWithContext(org, error);
+    }
+  }
+
+  logger.flush();
+}
+
+function createOctokit(dryRun: boolean, apiVersion: string): Octokit | null {
   const token = resolveAuthToken();
   if (!token) {
     if (dryRun) {
@@ -333,8 +412,91 @@ function createOctokit(dryRun: boolean): Octokit | null {
   }
 
   return new Octokit({
-    auth: token
+    auth: token,
+    request: {
+      headers: {
+        "X-GitHub-Api-Version": apiVersion
+      }
+    }
   });
+}
+
+async function runAuthPreflight(options: {
+  args: CliArgs;
+  config: BaselineConfig;
+  octokit: Octokit | null;
+}): Promise<void> {
+  const { args, config, octokit } = options;
+  if (args.dryRun) {
+    return;
+  }
+
+  if (!octokit) {
+    throw new Error("GitHub API client is not initialized");
+  }
+
+  const ghExecutable = resolveGhExecutable();
+  if (ghExecutable) {
+    const status = spawnSync(ghExecutable, ["auth", "status"], {
+      encoding: "utf8"
+    });
+
+    if (status.status !== 0 && !process.env.GITHUB_TOKEN && !process.env.GH_TOKEN) {
+      throw new Error(
+        [
+          "gh auth status failed and no GITHUB_TOKEN/GH_TOKEN is set.",
+          "Run one of:",
+          "- gh auth login -h github.com",
+          "- gh auth refresh -h github.com -s repo,read:org,admin:org"
+        ].join("\n")
+      );
+    }
+  } else if (!process.env.GITHUB_TOKEN && !process.env.GH_TOKEN) {
+    throw new Error(
+      [
+        "No gh executable found and no GITHUB_TOKEN/GH_TOKEN is set.",
+        "Set GITHUB_TOKEN or GH_TOKEN, or install/authenticate GitHub CLI."
+      ].join("\n")
+    );
+  }
+
+  if (args.org && Array.isArray(config.orgRulesets) && config.orgRulesets.length > 0) {
+    await assertOrgRulesetAccess({
+      org: args.org,
+      apiVersion: config.apiVersion,
+      octokit
+    });
+  }
+}
+
+async function assertOrgRulesetAccess(options: {
+  org: string;
+  apiVersion: string;
+  octokit: Octokit;
+}): Promise<void> {
+  try {
+    await options.octokit.request("GET /orgs/{org}/rulesets", {
+      org: options.org,
+      per_page: 1,
+      page: 1,
+      headers: {
+        "X-GitHub-Api-Version": options.apiVersion
+      }
+    });
+  } catch (error: unknown) {
+    if (isHttpError(error, 403) || isHttpError(error, 404)) {
+      throw new Error(
+        [
+          `Token cannot access organization rulesets for "${options.org}".`,
+          "Ensure the auth principal is an org admin/owner and refresh scopes/permissions.",
+          "For GitHub CLI classic scopes:",
+          "- gh auth refresh -h github.com -s repo,read:org,admin:org",
+          `Original error: ${getErrorMessage(error)}`
+        ].join("\n")
+      );
+    }
+    throw error;
+  }
 }
 
 function resolveAuthToken(): string | null {
@@ -708,7 +870,9 @@ async function applyRepositorySecurity(options: {
 }): Promise<void> {
   const { owner, repo, security, metadata, apiVersion, dryRun, octokit, log } = options;
 
-  if (security.code_security) {
+  if (typeof security.code_security === "boolean") {
+    const codeSecurityStatus = security.code_security ? "enabled" : "disabled";
+
     try {
       await callApi({
         method: "PATCH",
@@ -717,19 +881,21 @@ async function applyRepositorySecurity(options: {
         payload: {
           security_and_analysis: {
             code_security: {
-              status: "enabled"
+              status: codeSecurityStatus
             }
           }
         },
         apiVersion,
         dryRun,
-        label: "Enable GitHub Code Security",
+        label: `${security.code_security ? "Enable" : "Disable"} GitHub Code Security`,
         octokit,
         log
       });
     } catch (error: unknown) {
       if (isHttpError(error, 403) || isHttpError(error, 422)) {
-        log(`Skip enabling GitHub Code Security: ${getErrorMessage(error)}`);
+        log(
+          `Skip ${security.code_security ? "enabling" : "disabling"} GitHub Code Security: ${getErrorMessage(error)}`
+        );
       } else {
         throw error;
       }
@@ -764,11 +930,19 @@ async function applyRepositorySecurity(options: {
     });
   }
 
-  if (security.code_scanning_default_setup?.state === "configured") {
+  if (security.code_scanning_default_setup) {
+    const desiredState = security.code_scanning_default_setup.state;
     const mode = security.code_scanning_default_setup.mode ?? "eligible";
     const visibility = metadata?.visibility;
 
-    if (mode === "public-only" && visibility && visibility !== "public") {
+    // Low-cost profile: when code security is explicitly disabled, default setup is implicitly off.
+    // Skip this API call to avoid GitHub's "Code Security must be enabled" error noise.
+    if (desiredState === "not-configured" && security.code_security === false) {
+      log("Skip code scanning default setup: code security is disabled by policy");
+      return;
+    }
+
+    if (desiredState === "configured" && mode === "public-only" && visibility && visibility !== "public") {
       log("Skip code scanning default setup: repository is not public");
       return;
     }
@@ -779,14 +953,17 @@ async function applyRepositorySecurity(options: {
         endpoint: "PATCH /repos/{owner}/{repo}/code-scanning/default-setup",
         routeParams: { owner, repo },
         payload: {
-          state: "configured",
-          ...(security.code_scanning_default_setup.query_suite
+          state: desiredState,
+          ...(desiredState === "configured" && security.code_scanning_default_setup.query_suite
             ? { query_suite: security.code_scanning_default_setup.query_suite }
             : {})
         },
         apiVersion,
         dryRun,
-        label: "Configure code scanning default setup",
+        label:
+          desiredState === "configured"
+            ? "Configure code scanning default setup"
+            : "Disable code scanning default setup",
         octokit,
         log
       });
@@ -806,24 +983,70 @@ async function getRepositoryRulesets(options: {
   apiVersion: string;
   octokit: Octokit;
 }): Promise<ExistingRuleset[]> {
-  const response = await callApi({
-    method: "GET",
-    endpoint: "GET /repos/{owner}/{repo}/rulesets",
-    routeParams: { owner: options.owner, repo: options.name },
-    payload: null,
-    apiVersion: options.apiVersion,
-    dryRun: false,
-    label: "Fetch repository rulesets",
-    octokit: options.octokit,
-    log: () => {},
-    quiet: true
-  });
+  const allRulesets: ExistingRuleset[] = [];
+  let page = 1;
 
-  if (!Array.isArray(response)) {
-    throw new Error(`Expected rulesets array for ${options.owner}/${options.name}`);
+  while (true) {
+    const response = await options.octokit.request("GET /repos/{owner}/{repo}/rulesets", {
+      owner: options.owner,
+      repo: options.name,
+      per_page: 100,
+      page,
+      headers: {
+        "X-GitHub-Api-Version": options.apiVersion
+      }
+    });
+
+    if (!Array.isArray(response.data)) {
+      throw new Error(`Expected rulesets array for ${options.owner}/${options.name}`);
+    }
+
+    allRulesets.push(...(response.data as ExistingRuleset[]));
+    if (response.data.length < 100) {
+      break;
+    }
+
+    page += 1;
   }
 
-  return response as ExistingRuleset[];
+  return allRulesets;
+}
+
+async function getOrganizationRulesets(options: {
+  org: string;
+  apiVersion: string;
+  octokit: Octokit;
+}): Promise<ExistingRuleset[]> {
+  const allRulesets: ExistingRuleset[] = [];
+  let page = 1;
+
+  try {
+    while (true) {
+      const response = await options.octokit.request("GET /orgs/{org}/rulesets", {
+        org: options.org,
+        per_page: 100,
+        page,
+        headers: {
+          "X-GitHub-Api-Version": options.apiVersion
+        }
+      });
+
+      if (!Array.isArray(response.data)) {
+        throw new Error(`Expected organization rulesets array for ${options.org}`);
+      }
+
+      allRulesets.push(...(response.data as ExistingRuleset[]));
+      if (response.data.length < 100) {
+        break;
+      }
+
+      page += 1;
+    }
+  } catch (error: unknown) {
+    throw orgRulesetErrorWithContext(options.org, error);
+  }
+
+  return allRulesets;
 }
 
 function validateRuleset(ruleset: JsonObject): void {
@@ -922,6 +1145,23 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function orgRulesetErrorWithContext(org: string, error: unknown): Error {
+  if (isHttpError(error, 404) || isHttpError(error, 403)) {
+    return new Error(
+      [
+        `Organization rulesets API is not accessible for "${org}".`,
+        "Common causes:",
+        "- token/user is not an organization admin or owner",
+        "- token lacks org administration permission/scope",
+        "- organization rulesets are not available for this org plan",
+        `Original error: ${getErrorMessage(error)}`
+      ].join("\n")
+    );
+  }
+
+  return new Error(getErrorMessage(error));
+}
+
 function createRepoLogger(repo: string): { log: LogFn; flush: () => void } {
   const lines: string[] = [];
 
@@ -931,6 +1171,22 @@ function createRepoLogger(repo: string): { log: LogFn; flush: () => void } {
     },
     flush: () => {
       console.log(`\n==> ${repo}`);
+      for (const line of lines) {
+        console.log(line);
+      }
+    }
+  };
+}
+
+function createSectionLogger(title: string): { log: LogFn; flush: () => void } {
+  const lines: string[] = [];
+
+  return {
+    log: (message: string) => {
+      lines.push(message);
+    },
+    flush: () => {
+      console.log(`\n==> ${title}`);
       for (const line of lines) {
         console.log(line);
       }

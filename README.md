@@ -6,7 +6,7 @@ This repo contains a small TypeScript CLI for applying a default GitHub reposito
 - repository settings such as merge strategy, branch cleanup, wiki/projects/issues
 - repository topics
 - free repository security defaults such as Dependabot and public-repo code scanning
-- repository rulesets
+- organization rulesets
 - organization-wide repo selection for bulk rollout
 
 The tool uses Octokit, GitHub's official Node client. It works with GitHub.com and GitHub Enterprise Cloud as long as your token has the required admin permissions.
@@ -16,6 +16,7 @@ This repo uses `pnpm` and explicitly rejects `npm`.
 ## Files
 
 - `config/baseline.example.json`: sample baseline definition
+- `config/security-low-cost.json`: low-cost security baseline (no default CodeQL setup)
 - `src/apply-github-baseline.ts`: typed CLI source
 - `package.json`: build and run scripts
 
@@ -68,6 +69,14 @@ pnpm run apply:baseline -- \
   --org your-org
 ```
 
+Apply the low-cost security profile org-wide:
+
+```bash
+pnpm run apply:baseline -- \
+  --config config/security-low-cost.json \
+  --org your-org
+```
+
 Control parallelism explicitly:
 
 ```bash
@@ -106,6 +115,19 @@ The CLI checks for `gh` in this order:
 
 If you are managing organization-owned repositories, use an account or token that can edit repository settings and rulesets.
 
+If org ruleset calls return `Not Found` on `/orgs/{org}/rulesets`, that usually means your token cannot administer organization rulesets for that org (or the org plan does not support org rulesets). The CLI now surfaces this with explicit context.
+
+For org-ruleset runs, the CLI performs an auth preflight:
+
+- checks `gh auth status` when GitHub CLI is available
+- verifies the token can call `GET /orgs/{org}/rulesets` with your configured API version
+
+If this fails due permissions, refresh scopes:
+
+```bash
+gh auth refresh -h github.com -s repo,read:org,admin:org
+```
+
 ## Baseline Format
 
 The JSON file has three top-level sections:
@@ -120,7 +142,7 @@ The JSON file has three top-level sections:
     },
     "topics": ["managed", "baseline"]
   },
-  "rulesets": []
+  "orgRulesets": []
 }
 ```
 
@@ -168,14 +190,18 @@ Behavior:
 
 If present, topics are replaced via `PUT /repos/{owner}/{repo}/topics`.
 
-### `rulesets`
+### `orgRulesets`
 
-Each entry is sent directly to GitHub's repository rulesets API. The CLI upserts by `(name, target)`:
+Each entry is sent directly to GitHub's organization rulesets API. The CLI upserts by `(name, target)`:
 
 - if a matching ruleset exists, it updates it
 - otherwise it creates it
 
-That means you can keep the GitHub-native ruleset payload shape in JSON without inventing another DSL.
+Use this section when running with `--org`. If `orgRulesets` is present and `--org` is missing, the CLI fails fast.
+
+That means you can keep the GitHub-native org ruleset payload shape in JSON without inventing another DSL.
+
+If you still need per-repo rulesets for exceptional repositories, you can use `rulesets` in config. Those continue to apply at repository scope.
 
 If you want admins to be able to bypass a ruleset, include `bypass_actors`. The sample config now grants organization admins an always-on bypass:
 
@@ -191,7 +217,7 @@ If you want admins to be able to bypass a ruleset, include `bypass_actors`. The 
 }
 ```
 
-On organization-owned repositories, GitHub's ruleset docs list repository admins, organization owners, and enterprise owners as eligible bypass actors, and the REST rules API exposes `OrganizationAdmin` as a supported `actor_type`. If you want admins to bypass only through pull requests, use `bypass_mode: "pull_request"` instead. Sources: [rulesets UI docs](https://docs.github.com/en/organizations/managing-organization-settings/creating-rulesets-for-repositories-in-your-organization), [repo rules REST API](https://docs.github.com/rest/repos/rules).
+On organization-owned repositories, GitHub's ruleset docs list repository admins, organization owners, and enterprise owners as eligible bypass actors, and the REST rules API exposes `OrganizationAdmin` as a supported `actor_type`. If you want admins to bypass only through pull requests, use `bypass_mode: "pull_request"` instead. Sources: [rulesets UI docs](https://docs.github.com/en/organizations/managing-organization-settings/creating-rulesets-for-repositories-in-your-organization), [org rules REST API](https://docs.github.com/rest/orgs/rules).
 
 ### `repository.security`
 
@@ -202,7 +228,20 @@ The CLI can also enable a few repository security features directly:
 - `dependabot_security_updates`
 - `code_scanning_default_setup`
 
-The sample config enables `code_security` before `code_scanning_default_setup`, because GitHub's current prerequisite for default setup is that GitHub Actions are enabled and the repository is either public or has GitHub Code Security enabled. If GitHub rejects `code_security` or default setup for licensing or availability reasons, the CLI logs a skip and continues.
+The sample config is intentionally low-cost by default:
+
+- `code_security: false`
+- `code_scanning_default_setup.state: "not-configured"`
+- vulnerability and Dependabot features remain enabled
+
+This keeps core dependency/security hygiene while avoiding CodeQL Actions runtime on every repository.
+
+If you want deeper coverage on selected repositories, create a second config that sets:
+
+- `code_security: true`
+- `code_scanning_default_setup.state: "configured"`
+
+Then apply that second config only to a targeted subset using `--repo`, `--repos-file`, or `--match`.
 
 ## Recommended First Pass
 
