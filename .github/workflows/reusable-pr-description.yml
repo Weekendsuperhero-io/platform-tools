@@ -1,0 +1,223 @@
+# Reusable workflow: Generate PR title and description using Jules AI
+#
+# Usage in a consuming repo:
+#
+# ```yaml
+# name: Update PR Description
+# on:
+#   pull_request:
+#     types: [opened, edited]
+#
+# jobs:
+#   update-pr:
+#     uses: <owner>/<repo>/.github/workflows/reusable-pr-description.yml@main
+#     with:
+#       trigger-phrase: "@agent pr-title"   # optional
+#     secrets:
+#       JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
+#       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+# ```
+
+name: Reusable PR Description
+
+on:
+  workflow_call:
+    inputs:
+      trigger-phrase:
+        description: "The phrase that must appear in the PR body to trigger this workflow"
+        type: string
+        required: false
+        default: "@agent pr-title"
+      base-branch:
+        description: "The branch to diff against (defaults to the PR base branch)"
+        type: string
+        required: false
+        default: ""
+      diff-file-patterns:
+        description: "Space-separated glob patterns for files to include in the diff"
+        type: string
+        required: false
+        default: "'*.rs' '*.ts' '*.tsx' '*.toml' '*.sql' '*.yml' '*.sh' '*.css'"
+      diff-exclude-patterns:
+        description: "Space-separated patterns to exclude from the diff"
+        type: string
+        required: false
+        default: ":!pnpm-lock.yaml :!Cargo.lock ':!**/bindings/*.ts'"
+      max-diff-lines:
+        description: "Maximum lines of code diff to send to Jules"
+        type: number
+        required: false
+        default: 4000
+      max-commit-messages:
+        description: "Maximum number of commit messages to include"
+        type: number
+        required: false
+        default: 30
+      custom-prompt:
+        description: "Override the default prompt (leave empty to use built-in)"
+        type: string
+        required: false
+        default: ""
+    secrets:
+      JULES_API_KEY:
+        required: true
+      GITHUB_TOKEN:
+        required: true
+
+jobs:
+  update-pr:
+    name: Update PR Title & Description
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Check trigger phrase
+        if: github.event_name == 'pull_request'
+        run: |
+          if ! echo '${{ github.event.pull_request.body }}' | grep -qF "${{ inputs.trigger-phrase }}"; then
+            echo "Trigger phrase '${{ inputs.trigger-phrase }}' not found — skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+        id: check
+
+      - name: Set skip default (non-PR events)
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+        id: check-default
+
+      - name: Checkout PR head
+        if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 0
+
+      - name: Gather diff and metadata
+        if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
+        id: pr-info
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+          BASE_BRANCH: ${{ inputs.base-branch }}
+          PATTERNS: ${{ inputs.diff-file-patterns }}
+          EXCLUDES: ${{ inputs.diff-exclude-patterns }}
+          MAX_DIFF: ${{ inputs.max-diff-lines }}
+          MAX_COMMITS: ${{ inputs.max-commit-messages }}
+        run: |
+          set -euo pipefail
+
+          # Determine base ref
+          if [ -n "$BASE_SHA" ]; then
+            BASE_REF="$BASE_SHA"
+          elif [ -n "$BASE_BRANCH" ]; then
+            BASE_REF="origin/$BASE_BRANCH"
+          else
+            BASE_REF="origin/main"
+          fi
+
+          # Commit messages
+          git log --oneline "${BASE_REF}"..HEAD | head -n "$MAX_COMMITS" > /tmp/commits.txt
+
+          # Diff stats
+          git diff --stat "${BASE_REF}"...HEAD | tail -1 > /tmp/diff_stat.txt
+
+          # Build diff command with patterns
+          PATTERNS_ARRAY=($PATTERNS)
+          EXCLUDES_ARRAY=($EXCLUDES)
+
+          git diff "${BASE_REF}"...HEAD \
+            "${PATTERNS_ARRAY[@]}" \
+            "${EXCLUDES_ARRAY[@]}" \
+            | head -n "$MAX_DIFF" > /tmp/diff.txt
+
+      - name: Build prompt
+        if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
+        shell: bash
+        env:
+          CURRENT_TITLE: ${{ github.event_name == 'pull_request' && github.event.pull_request.title || '' }}
+          CUSTOM_PROMPT: ${{ inputs.custom-prompt }}
+        run: |
+          if [ -n "$CUSTOM_PROMPT" ]; then
+            cat > /tmp/prompt.txt << 'EOF'
+          EOF
+            echo "$CUSTOM_PROMPT" >> /tmp/prompt.txt
+          else
+            cat > /tmp/prompt.txt << 'HEREDOC_END'
+          You are writing a pull request title and description for a Tauri v2 desktop app.
+
+          Generate a JSON object with exactly two fields:
+          - "title": concise PR title under 70 chars, conventional commit format (feat:, fix:, refactor:, etc.)
+          - "body": markdown with these sections:
+            ## Summary (3-5 bullet points)
+            ## Changes (grouped by area)
+            ## Test plan (bulleted checklist)
+
+          Output ONLY the raw JSON object. No markdown fences. No explanation.
+          HEREDOC_END
+          fi
+
+          echo "" >> /tmp/prompt.txt
+          echo "=== CURRENT TITLE ===" >> /tmp/prompt.txt
+          echo "${CURRENT_TITLE}" >> /tmp/prompt.txt
+
+          echo "" >> /tmp/prompt.txt
+          echo "=== COMMITS ===" >> /tmp/prompt.txt
+          cat /tmp/commits.txt >> /tmp/prompt.txt
+
+          echo "" >> /tmp/prompt.txt
+          echo "=== DIFF STATS ===" >> /tmp/prompt.txt
+          cat /tmp/diff_stat.txt >> /tmp/prompt.txt
+
+          echo "" >> /tmp/prompt.txt
+          echo "=== CODE DIFF (truncated) ===" >> /tmp/prompt.txt
+          cat /tmp/diff.txt >> /tmp/prompt.txt
+
+          # Store full prompt as output for the composite action
+          PROMPT_CONTENT=$(cat /tmp/prompt.txt)
+          echo "prompt<<PROMPT_EOF" >> "$GITHUB_OUTPUT"
+          echo "$PROMPT_CONTENT" >> "$GITHUB_OUTPUT"
+          echo "PROMPT_EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Generate PR title and description with Jules
+        if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
+        id: jules
+        uses: ./.github/actions/jules-ai
+        with:
+          title: "PR Title and Description"
+          jules_api_key: ${{ secrets.JULES_API_KEY }}
+
+      - name: Update PR
+        if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CURRENT_TITLE: ${{ github.event.pull_request.title }}
+          JULES_OUTPUT: ${{ steps.jules.outputs.response }}
+        run: |
+          # Try parsing as JSON first
+          OUTPUT=$(echo "$JULES_OUTPUT" | sed 's/^```json//;s/^```//' | tr -d '\r')
+
+          TITLE=$(echo "$OUTPUT" | jq -r '.title // empty' 2>/dev/null)
+          BODY=$(echo "$OUTPUT" | jq -r '.body // empty' 2>/dev/null)
+
+          if [ -z "$TITLE" ] || [ -z "$BODY" ]; then
+            echo "Jules output is not JSON — using raw output as description"
+            TITLE="${CURRENT_TITLE}"
+            BODY="$JULES_OUTPUT"
+          fi
+
+          # Append attribution
+          BODY="${BODY}
+
+          ---
+          *PR description generated by [Jules](https://jules.google.com)*"
+
+          gh pr edit "$PR_NUMBER" --title "$TITLE" --body "$BODY"
+          echo "PR #${PR_NUMBER} updated successfully"

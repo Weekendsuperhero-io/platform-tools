@@ -1,0 +1,17 @@
+# Thin shim — delegates to the reusable workflow.
+# See .github/README.md for configuration options.
+
+name: Update PR Description with Jules
+
+on:
+  pull_request:
+    types: [opened, edited]
+
+jobs:
+  update-pr:
+    uses: ./.github/workflows/reusable-pr-description.yml
+    with:
+      trigger-phrase: "@agent pr-title"
+    secrets:
+      JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

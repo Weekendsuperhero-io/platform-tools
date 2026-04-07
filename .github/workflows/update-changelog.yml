@@ -1,0 +1,17 @@
+# Thin shim — delegates to the reusable workflow.
+# See .github/README.md for configuration options.
+
+name: Generate Changelog PR
+
+on:
+  workflow_dispatch:
+
+jobs:
+  update-changelog:
+    uses: ./.github/workflows/reusable-changelog.yml
+    with:
+      changelog-path: CHANGELOG.md
+      pr-branch-prefix: "chore/update-changelog"
+    secrets:
+      JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

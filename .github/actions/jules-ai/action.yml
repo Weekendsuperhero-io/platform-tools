@@ -1,0 +1,103 @@
+# Jules AI Agent - Core Interaction
+# Wraps the Jules API session creation and polling logic for reuse across workflows.
+#
+# This action expects the prompt to already be written to /tmp/jules_prompt.txt
+# by the calling workflow. This avoids passing very large prompts through action
+# inputs, which have size limits.
+
+name: "Jules AI Agent"
+description: "Creates a Jules session from /tmp/jules_prompt.txt and waits for the response"
+
+inputs:
+  title:
+    description: "Session title (for Jules metadata)"
+    required: false
+    default: "AI Task"
+  jules_api_key:
+    description: "JULES_API_KEY secret"
+    required: true
+  max_wait_seconds:
+    description: "Maximum seconds to wait for a response"
+    required: false
+    default: "360"
+  poll_interval_seconds:
+    description: "Seconds between poll attempts"
+    required: false
+    default: "10"
+
+outputs:
+  response:
+    description: "The text response from Jules"
+    value: ${{ steps.jules.outputs.response }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Create Jules session and poll for response
+      id: jules
+      shell: bash
+      env:
+        JULES_API_KEY: ${{ inputs.jules_api_key }}
+        MAX_WAIT: ${{ inputs.max_wait_seconds }}
+        INTERVAL: ${{ inputs.poll_interval_seconds }}
+        SESSION_TITLE: ${{ inputs.title }}
+      run: |
+        set -euo pipefail
+
+        API="https://jules.googleapis.com/v1alpha/sessions"
+
+        # Build JSON payload from file to avoid argument list too long
+        jq -Rs --arg title "$SESSION_TITLE" '{prompt: ., title: $title}' /tmp/jules_prompt.txt > /tmp/jules_payload.json
+
+        echo "Creating Jules session..." >&2
+        SESSION_RESP=$(curl -s "$API" \
+          -X POST \
+          -H "Content-Type: application/json" \
+          -H "x-goog-api-key: $JULES_API_KEY" \
+          -d @/tmp/jules_payload.json)
+
+        SESSION_NAME=$(echo "$SESSION_RESP" | jq -r '.name // empty')
+        if [ -z "$SESSION_NAME" ]; then
+          echo "::error::Failed to create Jules session"
+          echo "$SESSION_RESP" | jq . >&2
+          exit 1
+        fi
+
+        SESSION_ID=$(echo "$SESSION_NAME" | sed 's|sessions/||')
+        echo "Session: $SESSION_ID" >&2
+
+        # Poll for an agent activity
+        WAITED=0
+        while [ $WAITED -lt $MAX_WAIT ]; do
+          ACTIVITIES=$(curl -s -H "x-goog-api-key: $JULES_API_KEY" \
+            "$API/$SESSION_ID/activities")
+
+          AGENT_MSG=$(echo "$ACTIVITIES" | jq -r '
+            [(.activities // [])[]
+              | select(.originator == "agent")
+              | select(.agentMessaged != null)
+              | .agentMessaged.agentMessage
+            ] | first // empty
+          ')
+
+          if [ -n "$AGENT_MSG" ]; then
+            echo "Agent responded" >&2
+            echo "$AGENT_MSG" > /tmp/jules_response.txt
+            break
+          fi
+
+          echo "  Waiting for agent response... (${WAITED}s)" >&2
+          sleep $INTERVAL
+          WAITED=$((WAITED + INTERVAL))
+        done
+
+        if [ $WAITED -ge $MAX_WAIT ]; then
+          echo "::error::Timed out waiting for Jules agent response (${MAX_WAIT}s)"
+          exit 1
+        fi
+
+        # Write response to GITHUB_OUTPUT
+        RESPONSE=$(cat /tmp/jules_response.txt)
+        echo "response<<JULES_EOF" >> "$GITHUB_OUTPUT"
+        echo "$RESPONSE" >> "$GITHUB_OUTPUT"
+        echo "JULES_EOF" >> "$GITHUB_OUTPUT"
