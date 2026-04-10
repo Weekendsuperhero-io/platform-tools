@@ -76,6 +76,9 @@ on:
         required: false
         default: --release
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
