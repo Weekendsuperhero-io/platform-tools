@@ -26,12 +26,13 @@ on:
 
 jobs:
   update-pr:
+    permissions:
+      contents: read
+      pull-requests: write
     uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-pr-description.yml@main
     with:
       trigger-phrase: "@agent pr-title" # optional — only runs if this phrase is in the PR body
-    secrets:
-      JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    secrets: inherit
 ```
 
 **How it works:**
@@ -56,13 +57,14 @@ on:
 
 jobs:
   changelog:
+    permissions:
+      contents: write
+      pull-requests: write
     uses: <owner>/<repo>/.github/workflows/reusable-changelog.yml@main
     with:
       changelog-path: CHANGELOG.md
       pr-branch-prefix: "chore/changelog-"
-    secrets:
-      JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    secrets: inherit
 ```
 
 **How it works:**
@@ -150,8 +152,7 @@ jobs:
       macos-universal-output-archive: agentmail-macos-universal.tar.gz
       publish-crates-io: true
       cargo-publish-command: cargo publish -p agentmail
-    secrets:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    secrets: inherit
 ```
 
 ## Configuration Options
@@ -238,6 +239,10 @@ Rust release workflow requires:
 | Secret                  | Required | Description                                            |
 | ----------------------- | -------- | ------------------------------------------------------ |
 | `CARGO_REGISTRY_TOKEN`  | Only when `publish-crates-io=true` | crates.io API token for `cargo publish` |
+
+Caller workflows can either pass named secrets explicitly (`secrets: { ... }`) or use `secrets: inherit`.
+`secrets: inherit` is set in the caller job that uses the reusable workflow and is supported for repositories in the same organization or enterprise.
+Permissions are separate from secrets: set explicit `permissions` in both caller and reusable workflows for least privilege.
 
 ## Architecture
 

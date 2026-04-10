@@ -8,10 +8,11 @@ on:
 
 jobs:
   update-changelog:
+    permissions:
+      contents: write
+      pull-requests: write
     uses: ./.github/workflows/reusable-changelog.yml
     with:
       changelog-path: CHANGELOG.md
       pr-branch-prefix: "chore/update-changelog"
-    secrets:
-      JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    secrets: inherit

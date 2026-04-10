@@ -10,12 +10,13 @@
 #
 # jobs:
 #   update-pr:
+#     permissions:
+#       contents: read
+#       pull-requests: write
 #     uses: <owner>/<repo>/.github/workflows/reusable-pr-description.yml@main
 #     with:
 #       trigger-phrase: "@agent pr-title"   # optional
-#     secrets:
-#       JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
-#       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#     secrets: inherit
 # ```
 
 name: Reusable PR Description
