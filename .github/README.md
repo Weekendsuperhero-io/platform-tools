@@ -69,7 +69,7 @@ jobs:
 
 - Finds the last commit that touched `CHANGELOG.md`
 - Collects all commits since then
-- Sends commits + diff to Jules AI to generate changelog entries
+- Sends full commit messages (subject + body) to Jules AI to generate changelog entries
 - Inserts entries under `## [Unreleased]` (Keep a Changelog format)
 - Creates a PR with the updated changelog
 
@@ -174,10 +174,10 @@ jobs:
 | ----------------------- | --------------------------- | ------------------------------------------------ |
 | `changelog-path`        | `CHANGELOG.md`              | Path to your changelog file                      |
 | `pr-branch-prefix`      | `chore/update-changelog`    | Prefix for the generated PR branch               |
-| `diff-file-patterns`    | _(same as PR)_              | File patterns to include                         |
-| `diff-exclude-patterns` | _(same as PR)_              | Patterns to exclude                              |
-| `max-diff-lines`        | `4000`                      | Max lines of code diff                           |
-| `max-commit-messages`   | `50`                        | Max commit messages                              |
+| `max-commit-messages`   | `50`                        | Max full commit messages (subject + body) to include |
+| `diff-file-patterns`    | _(legacy)_                  | Deprecated and ignored (kept for compatibility)  |
+| `diff-exclude-patterns` | _(legacy)_                  | Deprecated and ignored (kept for compatibility)  |
+| `max-diff-lines`        | `4000`                      | Deprecated and ignored (kept for compatibility)  |
 | `fallback-commit-count` | `20`                        | Commits to use when no previous changelog entry  |
 | `unreleased-heading`    | `## [Unreleased]`           | The heading to insert entries under              |
 | `custom-prompt`         | _(built-in)_                | Override the Jules prompt                        |
@@ -241,30 +241,30 @@ Rust release workflow requires:
 
 ## Architecture
 
-```
-┌──────────────────────────────┐
-│   Consuming Repository       │
-│                              │
-│  .github/workflows/          │
-│    pr-description.yml ───────┼──┐
-│    changelog.yml ────────────┼──┐
-│    ci.yml ───────────────────┼──┐
-│    release.yml ──────────────┼──┐
-└──────────────────────────────┘  │
-                                  │ workflow_call
-                                  ▼
-┌──────────────────────────────┐
-│   Source Repository          │
-│                              │
-│  .github/workflows/          │
-│    reusable-pr-description.yml│
-│    reusable-changelog.yml    │
-│    reusable-rust-ci.yml      │
-│    reusable-rust-release.yml │
-│                              │
-│  .github/actions/            │
-│    jules-ai/action.yml ──────┼──┐ (composite action)
-└──────────────────────────────┘
+```mermaid
+flowchart TD
+  subgraph Consuming["Consuming Repository"]
+    C1[".github/workflows/pr-description.yml"]
+    C2[".github/workflows/changelog.yml"]
+    C3[".github/workflows/ci.yml"]
+    C4[".github/workflows/release.yml"]
+  end
+
+  subgraph Source["Source Repository"]
+    R1[".github/workflows/reusable-pr-description.yml"]
+    R2[".github/workflows/reusable-changelog.yml"]
+    R3[".github/workflows/reusable-rust-ci.yml"]
+    R4[".github/workflows/reusable-rust-release.yml"]
+    A1[".github/actions/jules-ai/action.yml (composite)"]
+  end
+
+  C1 -- workflow_call --> R1
+  C2 -- workflow_call --> R2
+  C3 -- workflow_call --> R3
+  C4 -- workflow_call --> R4
+
+  R1 --> A1
+  R2 --> A1
 ```
 
 ## Troubleshooting
