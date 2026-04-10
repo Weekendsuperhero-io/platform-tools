@@ -13,6 +13,11 @@ on:
         type: string
         required: false
         default: rustfmt,clippy
+      rust-cache-provider:
+        description: Rust cache backend for Swatinem/rust-cache (github or warpbuild)
+        type: string
+        required: false
+        default: github
       check-os-json:
         description: JSON array of runners for fmt/clippy/build/test
         type: string
@@ -96,6 +101,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-ci-${{ matrix.os }}
+          cache-provider: ${{ inputs.rust-cache-provider }}
           cache-on-failure: true
 
       - name: Install Linux dependencies
@@ -137,6 +143,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-ci-build-${{ matrix.os }}-${{ matrix.target }}
+          cache-provider: ${{ inputs.rust-cache-provider }}
           cache-on-failure: true
 
       - name: Install Linux dependencies
@@ -166,6 +173,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-ci-docs-${{ inputs.docs-os }}
+          cache-provider: ${{ inputs.rust-cache-provider }}
           cache-on-failure: true
 
       - name: Install Linux dependencies

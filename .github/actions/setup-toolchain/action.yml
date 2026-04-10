@@ -14,6 +14,10 @@ inputs:
     description: Cache key prefix for Rust target directory (e.g. "ci", "release", "release-aarch64-pc-windows-msvc")
     required: false
     default: "default"
+  rust-cache-provider:
+    description: Rust cache backend provider for Swatinem/rust-cache (github or warpbuild)
+    required: false
+    default: "github"
   skip-frontend:
     description: Skip frontend dependency installation
     required: false
@@ -47,6 +51,7 @@ runs:
       uses: Swatinem/rust-cache@v2
       with:
         shared-key: ${{ inputs.rust-cache-key }}
+        cache-provider: ${{ inputs.rust-cache-provider }}
         cache-targets: true
         cache-on-failure: true
         cache-all-crates: true

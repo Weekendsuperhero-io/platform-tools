@@ -8,6 +8,11 @@ on:
         type: string
         required: false
         default: stable
+      rust-cache-provider:
+        description: Rust cache backend for Swatinem/rust-cache (github or warpbuild)
+        type: string
+        required: false
+        default: github
       validate-runs-on:
         description: Runner used for validate job
         type: string
@@ -178,6 +183,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-release-validate-${{ runner.os }}
+          cache-provider: ${{ inputs.rust-cache-provider }}
           cache-on-failure: true
 
       - name: Install Linux dependencies
@@ -220,6 +226,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-release-build-${{ matrix.os }}-${{ matrix.target }}
+          cache-provider: ${{ inputs.rust-cache-provider }}
           cache-on-failure: true
 
       - name: Install Linux dependencies

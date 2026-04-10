@@ -91,6 +91,7 @@ jobs:
     uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-rust-ci.yml@main
     with:
       check-os-json: '["ubuntu-latest","macos-latest","windows-latest"]'
+      rust-cache-provider: github
       docs-os: ubuntu-latest
       linux-packages: "libdbus-1-dev pkg-config"
       build-matrix-json: "[]"
@@ -104,6 +105,7 @@ jobs:
     uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-rust-ci.yml@main
     with:
       check-os-json: '["macos-latest"]'
+      rust-cache-provider: warpbuild
       docs-os: macos-latest
       build-matrix-json: >-
         [
@@ -129,6 +131,7 @@ jobs:
     uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-rust-release.yml@main
     with:
       validate-runs-on: ubuntu-latest
+      rust-cache-provider: github
       validate-linux-packages: "libdbus-1-dev pkg-config"
       binary-matrix-json: >-
         [
@@ -186,6 +189,7 @@ jobs:
 | Input                             | Default                                      | Description                                              |
 | --------------------------------- | -------------------------------------------- | -------------------------------------------------------- |
 | `rust-toolchain`                  | `stable`                                     | Rust version/toolchain                                   |
+| `rust-cache-provider`             | `github`                                     | Rust cache backend provider (`github` or `warpbuild`)    |
 | `check-os-json`                   | `["ubuntu-latest"]`                          | Runner matrix for fmt/clippy/build/test                  |
 | `docs-os`                         | `ubuntu-latest`                              | Runner for docs job                                      |
 | `linux-packages`                  | _(empty)_                                    | Linux apt packages installed where needed                |
@@ -203,6 +207,7 @@ jobs:
 | Input                               | Default                     | Description                                                |
 | ----------------------------------- | --------------------------- | ---------------------------------------------------------- |
 | `validate-runs-on`                  | `ubuntu-latest`             | Runner for release validation                              |
+| `rust-cache-provider`               | `github`                   | Rust cache backend provider (`github` or `warpbuild`)      |
 | `validate-linux-packages`           | _(empty)_                   | Linux apt packages for validation                          |
 | `binary-matrix-json`                | `[]`                        | Release build matrix (JSON array with name/os/target/etc) |
 | `build-linux-packages`              | _(empty)_                   | Linux apt packages for binary build jobs                   |
