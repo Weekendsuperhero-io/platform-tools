@@ -240,7 +240,7 @@ jobs:
       - name: Generate changelog entry with Jules
         if: steps.changes.outputs.skip != 'true'
         id: jules
-        uses: ./.github/actions/jules-ai
+        uses: weekendsuperhero-io/platform-tools/.github/actions/jules-ai@main
         with:
           title: "Changelog Update"
           jules_api_key: ${{ secrets.JULES_API_KEY }}

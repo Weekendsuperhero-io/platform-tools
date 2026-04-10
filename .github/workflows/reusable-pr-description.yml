@@ -224,7 +224,7 @@ jobs:
       - name: Generate PR title and description with Jules
         if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
         id: jules
-        uses: ./.github/actions/jules-ai
+        uses: weekendsuperhero-io/platform-tools/.github/actions/jules-ai@main
         with:
           title: "PR Title and Description"
           jules_api_key: ${{ secrets.JULES_API_KEY }}
