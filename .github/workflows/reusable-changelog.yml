@@ -87,10 +87,6 @@ on:
     secrets:
       JULES_API_KEY:
         required: true
-      GITHUB_APP_ID:
-        required: false
-      GITHUB_APP_PRIVATE_KEY:
-        required: false
       JULES_PR_CLIENT_ID:
         required: false
       JULES_PR_PRIVATE_KEY:
@@ -109,58 +105,19 @@ jobs:
       - name: Validate GitHub App secret configuration
         shell: bash
         env:
-          GH_APP_ID: ${{ secrets.GITHUB_APP_ID }}
-          GH_APP_KEY: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
           JULES_APP_ID: ${{ secrets.JULES_PR_CLIENT_ID }}
           JULES_APP_KEY: ${{ secrets.JULES_PR_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-
-          if { [ -n "${GH_APP_ID}" ] && [ -z "${GH_APP_KEY}" ]; } || { [ -z "${GH_APP_ID}" ] && [ -n "${GH_APP_KEY}" ]; }; then
-            echo "::error::Set both GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY, or neither."
-            exit 1
-          fi
 
           if { [ -n "${JULES_APP_ID}" ] && [ -z "${JULES_APP_KEY}" ]; } || { [ -z "${JULES_APP_ID}" ] && [ -n "${JULES_APP_KEY}" ]; }; then
             echo "::error::Set both JULES_PR_CLIENT_ID and JULES_PR_PRIVATE_KEY, or neither."
             exit 1
           fi
 
-      - name: Resolve GitHub App auth source
-        id: app-auth
-        shell: bash
-        env:
-          GH_APP_ID: ${{ secrets.GITHUB_APP_ID }}
-          GH_APP_KEY: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
-          JULES_APP_ID: ${{ secrets.JULES_PR_CLIENT_ID }}
-          JULES_APP_KEY: ${{ secrets.JULES_PR_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-
-          USE_GH=false
-          USE_JULES=false
-
-          if [ -n "${GH_APP_ID}" ] && [ -n "${GH_APP_KEY}" ]; then
-            USE_GH=true
-          elif [ -n "${JULES_APP_ID}" ] && [ -n "${JULES_APP_KEY}" ]; then
-            USE_JULES=true
-          fi
-
-          echo "use_gh=${USE_GH}" >> "$GITHUB_OUTPUT"
-          echo "use_jules=${USE_JULES}" >> "$GITHUB_OUTPUT"
-
-      - name: Generate GitHub App token (preferred secrets)
-        if: steps.app-auth.outputs.use_gh == 'true'
-        id: app-token-gh
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.GITHUB_APP_ID }}
-          private-key: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-
-      - name: Generate GitHub App token (Jules default secrets)
-        if: steps.app-auth.outputs.use_jules == 'true'
-        id: app-token-jules
+      - name: Generate GitHub App token
+        if: secrets.JULES_PR_CLIENT_ID != '' && secrets.JULES_PR_PRIVATE_KEY != ''
+        id: app-token
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.JULES_PR_CLIENT_ID }}
@@ -168,12 +125,12 @@ jobs:
           owner: ${{ github.repository_owner }}
 
       - name: Get GitHub App bot identity
-        if: steps.app-token-gh.outputs.token != '' || steps.app-token-jules.outputs.token != ''
+        if: steps.app-token.outputs.token != ''
         id: app-bot
         shell: bash
         env:
-          GH_TOKEN: ${{ steps.app-token-gh.outputs.token || steps.app-token-jules.outputs.token }}
-          APP_SLUG: ${{ steps.app-token-gh.outputs.app-slug || steps.app-token-jules.outputs.app-slug }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
         run: |
           set -euo pipefail
 
@@ -188,7 +145,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ steps.app-token-gh.outputs.token || steps.app-token-jules.outputs.token || github.token }}
+          token: ${{ steps.app-token.outputs.token || github.token }}
           fetch-depth: 0
 
       - name: Find changes since last changelog update
@@ -317,7 +274,7 @@ jobs:
         if: steps.changes.outputs.skip != 'true'
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ steps.app-token-gh.outputs.token || steps.app-token-jules.outputs.token || github.token }}
+          token: ${{ steps.app-token.outputs.token || github.token }}
           author: ${{ steps.app-bot.outputs.identity || 'github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>' }}
           committer: ${{ steps.app-bot.outputs.identity || 'github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>' }}
           commit-message: "docs: update CHANGELOG.md"

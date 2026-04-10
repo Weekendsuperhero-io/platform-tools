@@ -230,10 +230,8 @@ Jules workflows require:
 | Secret          | Required | Description                                             |
 | --------------- | -------- | ------------------------------------------------------- |
 | `JULES_API_KEY` | Yes      | API key for Jules AI                                    |
-| `GITHUB_APP_ID` | Optional | Preferred GitHub App ID |
-| `GITHUB_APP_PRIVATE_KEY` | Optional | Preferred GitHub App private key PEM (must be set with `GITHUB_APP_ID`) |
-| `JULES_PR_CLIENT_ID` | Optional | Default fallback App ID/Client ID for Jules PR automation |
-| `JULES_PR_PRIVATE_KEY` | Optional | Default fallback private key PEM (must be set with `JULES_PR_CLIENT_ID`) |
+| `JULES_PR_CLIENT_ID` | Optional | GitHub App ID / client ID for Jules PR automation |
+| `JULES_PR_PRIVATE_KEY` | Optional | GitHub App private key PEM (must be set with `JULES_PR_CLIENT_ID`) |
 
 Add `JULES_API_KEY` to your repo's **Settings → Secrets and variables → Actions**.
 
@@ -246,7 +244,7 @@ Rust release workflow requires:
 Caller workflows can either pass named secrets explicitly (`secrets: { ... }`) or use `secrets: inherit`.
 `secrets: inherit` is set in the caller job that uses the reusable workflow and is supported for repositories in the same organization or enterprise.
 `GITHUB_TOKEN` is automatically available to workflows via `github.token`; no explicit secret declaration is required in the reusable workflow.
-For GitHub App auth, workflows use `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY` when present, otherwise default to `JULES_PR_CLIENT_ID` + `JULES_PR_PRIVATE_KEY`.
+For GitHub App auth, workflows use `JULES_PR_CLIENT_ID` + `JULES_PR_PRIVATE_KEY`.
 Client secret alone is not sufficient; you need the app private key.
 GitHub App permissions for PR description/changelog automation: `Pull requests: Read and write`; add `Contents: Read and write` when creating commit branches/PRs (for changelog), and at least `Contents: Read` for checkout operations with app token.
 When GitHub App auth is used in changelog workflow, commits are authored/committed as `<app-slug>[bot] <id+app-slug[bot]@users.noreply.github.com>`.
