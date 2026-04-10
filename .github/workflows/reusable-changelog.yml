@@ -87,8 +87,6 @@ on:
     secrets:
       JULES_API_KEY:
         required: true
-      GITHUB_TOKEN:
-        required: true
 
 jobs:
   changelog:
@@ -231,7 +229,7 @@ jobs:
         if: steps.changes.outputs.skip != 'true'
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ github.token }}
           commit-message: "docs: update CHANGELOG.md"
           title: ${{ inputs.pr-title }}
           body: ${{ format(inputs.pr-body-template, steps.changes.outputs.commit_count) }}

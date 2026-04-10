@@ -230,7 +230,6 @@ Jules workflows require:
 | Secret          | Required | Description                                             |
 | --------------- | -------- | ------------------------------------------------------- |
 | `JULES_API_KEY` | Yes      | API key for Jules AI                                    |
-| `GITHUB_TOKEN`  | Yes      | GitHub token (provided automatically by GitHub Actions) |
 
 Add `JULES_API_KEY` to your repo's **Settings → Secrets and variables → Actions**.
 
@@ -242,6 +241,7 @@ Rust release workflow requires:
 
 Caller workflows can either pass named secrets explicitly (`secrets: { ... }`) or use `secrets: inherit`.
 `secrets: inherit` is set in the caller job that uses the reusable workflow and is supported for repositories in the same organization or enterprise.
+`GITHUB_TOKEN` is automatically available to workflows via `github.token`; no explicit secret declaration is required in the reusable workflow.
 Permissions are separate from secrets: set explicit `permissions` in both caller and reusable workflows for least privilege.
 
 ## Architecture
