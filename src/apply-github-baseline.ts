@@ -1131,6 +1131,22 @@ const SECURITY_CONFIGURATION_STATUS_FIELDS = [
   "private_vulnerability_reporting"
 ] as const;
 
+const SECRET_SCANNING_DEPENDENT_STATUS_FIELDS = new Set<string>([
+  "secret_scanning_validity_checks",
+  "secret_scanning_non_provider_patterns",
+  "secret_scanning_generic_secrets",
+  "secret_scanning_delegated_alert_dismissal",
+  "secret_scanning_extended_metadata"
+]);
+
+function isCodeSecurityEffectivelyEnabled(config: OrgSecurityConfigurationConfig): boolean {
+  if (config.code_security === "enabled") {
+    return true;
+  }
+
+  return config.advanced_security === "enabled" || config.advanced_security === "code_security";
+}
+
 function validateOrgSecurityConfigurations(configurations: unknown, label: string): void {
   if (configurations === undefined) {
     return;
@@ -1178,6 +1194,28 @@ function validateOrgSecurityConfiguration(configuration: unknown, label: string)
     const value = config[field];
     if (value !== undefined && !isSecurityConfigurationStatus(value)) {
       throw new Error(`${label}.${field} must be one of: enabled, disabled, not_set`);
+    }
+  }
+
+  const isSecretScanningEnabled = config.secret_scanning === "enabled";
+  for (const field of SECRET_SCANNING_DEPENDENT_STATUS_FIELDS) {
+    const value = config[field as keyof OrgSecurityConfigurationConfig];
+    if (value === "enabled" && !isSecretScanningEnabled) {
+      throw new Error(`${label}.${field} cannot be "enabled" unless ${label}.secret_scanning is "enabled"`);
+    }
+  }
+
+  if (config.dependabot_delegated_alert_dismissal === "enabled") {
+    if (config.dependabot_alerts !== "enabled") {
+      throw new Error(
+        `${label}.dependabot_delegated_alert_dismissal cannot be "enabled" unless ${label}.dependabot_alerts is "enabled"`
+      );
+    }
+
+    if (!isCodeSecurityEffectivelyEnabled(config)) {
+      throw new Error(
+        `${label}.dependabot_delegated_alert_dismissal cannot be "enabled" unless code security is enabled`
+      );
     }
   }
 
@@ -1611,8 +1649,18 @@ async function applyOrganizationScope(options: {
 const ORG_SETTINGS_MUTABLE_KEYS: Array<keyof OrgSettingsConfig> = [
   ...ORG_SETTINGS_STRING_KEYS,
   ...ORG_SETTINGS_BOOLEAN_KEYS,
-  "default_repository_permission",
-  "members_allowed_repository_creation_type"
+  "default_repository_permission"
+];
+
+const ORG_SETTINGS_DEPRECATED_KEYS: Array<keyof OrgSettingsConfig> = [
+  "members_allowed_repository_creation_type",
+  "advanced_security_enabled_for_new_repositories",
+  "dependabot_alerts_enabled_for_new_repositories",
+  "dependabot_security_updates_enabled_for_new_repositories",
+  "dependency_graph_enabled_for_new_repositories",
+  "secret_scanning_enabled_for_new_repositories",
+  "secret_scanning_push_protection_enabled_for_new_repositories",
+  "secret_scanning_validity_checks_enabled"
 ];
 
 function buildOrgSettingsPayload(settings: OrgSettingsConfig): JsonObject {
@@ -1641,7 +1689,17 @@ async function applyOrganizationSettings(options: {
   }
 
   const logger = createSectionLogger(`Organization settings (${org})`);
+  const deprecatedConfiguredFields = ORG_SETTINGS_DEPRECATED_KEYS.filter((key) => settings[key] !== undefined);
+  if (deprecatedConfiguredFields.length > 0) {
+    logger.log(
+      "Skip deprecated org.settings fields (GitHub API closing down notices): " +
+        deprecatedConfiguredFields.map((field) => String(field)).join(", ")
+    );
+    logger.log("Use org.security_configurations defaults for new-repo security behavior.");
+  }
+
   const desiredPayload = buildOrgSettingsPayload(settings);
+  let teamOrgInternalRepoSettingUnsupported = false;
 
   if (Object.keys(desiredPayload).length === 0) {
     logger.log("Skip org settings update: no org.settings fields set");
@@ -1663,26 +1721,90 @@ async function applyOrganizationSettings(options: {
       log: logger.log,
       quiet: true
     });
-    payloadToApply = buildChangedPayload(desiredPayload, asJsonObject(currentSettings));
+    const currentSettingsObject = asJsonObject(currentSettings);
+    const plan = asJsonObject(currentSettingsObject.plan);
+    const planName = typeof plan.name === "string" ? plan.name.toLowerCase() : null;
+    if (
+      planName === "team" &&
+      desiredPayload.members_can_create_internal_repositories !== undefined
+    ) {
+      delete desiredPayload.members_can_create_internal_repositories;
+      teamOrgInternalRepoSettingUnsupported = true;
+    }
+
+    payloadToApply = buildChangedPayload(desiredPayload, currentSettingsObject);
 
     if (Object.keys(payloadToApply).length === 0) {
       logger.log("Skip org settings update: already aligned");
+      if (teamOrgInternalRepoSettingUnsupported) {
+        logger.log("Skip org.settings.members_can_create_internal_repositories: not supported on Team orgs.");
+      }
       logger.flush();
       return;
     }
   }
 
-  await callApi({
-    method: "PATCH",
-    endpoint: "PATCH /orgs/{org}",
-    routeParams: { org },
-    payload: payloadToApply,
-    apiVersion: config.apiVersion,
-    dryRun,
-    label: "Update organization settings",
-    octokit,
-    log: logger.log
-  });
+  if (teamOrgInternalRepoSettingUnsupported) {
+    logger.log("Skip org.settings.members_can_create_internal_repositories: not supported on Team orgs.");
+  }
+
+  try {
+    await callApi({
+      method: "PATCH",
+      endpoint: "PATCH /orgs/{org}",
+      routeParams: { org },
+      payload: payloadToApply,
+      apiVersion: config.apiVersion,
+      dryRun,
+      label: "Update organization settings",
+      octokit,
+      log: logger.log
+    });
+  } catch (error: unknown) {
+    const message = getErrorMessage(error);
+    if (
+      message.includes("Private-only repository creation policy is not allowed") &&
+      settings.members_can_create_public_repositories === false
+    ) {
+      throw new Error(
+        [
+          "Organization rejected members_can_create_public_repositories=false for this org.",
+          "Set org.settings.members_can_create_public_repositories=true and retry.",
+          `Original error: ${message}`
+        ].join("\n")
+      );
+    }
+
+    if (
+      message.includes("does not support internal repositories") &&
+      payloadToApply.members_can_create_internal_repositories !== undefined
+    ) {
+      const retryPayload: JsonObject = { ...payloadToApply };
+      delete retryPayload.members_can_create_internal_repositories;
+      if (Object.keys(retryPayload).length === 0) {
+        logger.log("Skip org.settings.members_can_create_internal_repositories: not supported on this org.");
+        logger.flush();
+        return;
+      }
+
+      logger.log("Retry org settings update without members_can_create_internal_repositories.");
+      await callApi({
+        method: "PATCH",
+        endpoint: "PATCH /orgs/{org}",
+        routeParams: { org },
+        payload: retryPayload,
+        apiVersion: config.apiVersion,
+        dryRun,
+        label: "Update organization settings",
+        octokit,
+        log: logger.log
+      });
+      logger.flush();
+      return;
+    }
+
+    throw error;
+  }
 
   logger.flush();
 }
@@ -1734,6 +1856,7 @@ async function prepareOrgPayloadUpdate(options: {
   desiredPayload: JsonObject;
   log: LogFn;
   comparisonLabel: string;
+  requiredKeys?: string[];
 }): Promise<JsonObject | null> {
   const {
     force,
@@ -1744,7 +1867,8 @@ async function prepareOrgPayloadUpdate(options: {
     getEndpoint,
     desiredPayload,
     log,
-    comparisonLabel
+    comparisonLabel,
+    requiredKeys = []
   } = options;
 
   if (force || dryRun || !octokit) {
@@ -1767,6 +1891,12 @@ async function prepareOrgPayloadUpdate(options: {
     const changedPayload = buildChangedPayload(desiredPayload, asJsonObject(current));
     if (Object.keys(changedPayload).length === 0) {
       return null;
+    }
+
+    for (const key of requiredKeys) {
+      if (desiredPayload[key] !== undefined) {
+        changedPayload[key] = desiredPayload[key] as JsonValue;
+      }
     }
 
     return changedPayload;
@@ -1835,7 +1965,8 @@ async function applyOrganizationActions(options: {
       getEndpoint: "GET /orgs/{org}/actions/permissions",
       desiredPayload: permissionsPayload,
       log: logger.log,
-      comparisonLabel: "org Actions permissions"
+      comparisonLabel: "org Actions permissions",
+      requiredKeys: ["enabled_repositories"]
     });
 
     if (!permissionsPayloadToApply) {
@@ -1867,7 +1998,8 @@ async function applyOrganizationActions(options: {
         getEndpoint: "GET /orgs/{org}/actions/permissions/selected-actions",
         desiredPayload: selectedActionsPayload,
         log: logger.log,
-        comparisonLabel: "org selected-actions policy"
+        comparisonLabel: "org selected-actions policy",
+        requiredKeys: ["github_owned_allowed"]
       });
 
       if (!selectedActionsPayloadToApply) {
@@ -1904,7 +2036,8 @@ async function applyOrganizationActions(options: {
       getEndpoint: "GET /orgs/{org}/actions/permissions/artifact-and-log-retention",
       desiredPayload: retentionPayload,
       log: logger.log,
-      comparisonLabel: "org artifact/log retention"
+      comparisonLabel: "org artifact/log retention",
+      requiredKeys: ["days"]
     });
 
     if (!retentionPayloadToApply) {
@@ -1938,7 +2071,8 @@ async function applyOrganizationActions(options: {
       getEndpoint: "GET /orgs/{org}/actions/permissions/fork-pr-contributor-approval",
       desiredPayload: approvalPayload,
       log: logger.log,
-      comparisonLabel: "fork PR contributor approval policy"
+      comparisonLabel: "fork PR contributor approval policy",
+      requiredKeys: ["approval_policy"]
     });
 
     if (!approvalPayloadToApply) {
@@ -1987,7 +2121,8 @@ async function applyOrganizationActions(options: {
         getEndpoint: "GET /orgs/{org}/actions/permissions/fork-pr-workflows-private-repos",
         desiredPayload: forkPrivatePayload,
         log: logger.log,
-        comparisonLabel: "private/internal fork PR workflow policy"
+        comparisonLabel: "private/internal fork PR workflow policy",
+        requiredKeys: ["run_workflows_from_fork_pull_requests"]
       });
 
       if (!forkPrivatePayloadToApply) {
@@ -2030,7 +2165,8 @@ async function applyOrganizationActions(options: {
       getEndpoint: "GET /orgs/{org}/actions/permissions/self-hosted-runners",
       desiredPayload: selfHostedPayload,
       log: logger.log,
-      comparisonLabel: "org self-hosted runners policy"
+      comparisonLabel: "org self-hosted runners policy",
+      requiredKeys: ["enabled_repositories"]
     });
 
     if (!selfHostedPayloadToApply) {
@@ -2110,7 +2246,8 @@ async function applyOrganizationActions(options: {
         getEndpoint: "GET /organizations/{org}/actions/cache/storage-limit",
         desiredPayload: cacheSizePayload,
         log: logger.log,
-        comparisonLabel: "org Actions cache storage limit"
+        comparisonLabel: "org Actions cache storage limit",
+        requiredKeys: ["max_cache_size_gb"]
       });
 
       if (!cacheSizePayloadToApply) {
@@ -2157,7 +2294,8 @@ async function applyOrganizationActions(options: {
         getEndpoint: "GET /organizations/{org}/actions/cache/retention-limit",
         desiredPayload: cacheRetentionPayload,
         log: logger.log,
-        comparisonLabel: "org Actions cache retention limit"
+        comparisonLabel: "org Actions cache retention limit",
+        requiredKeys: ["max_cache_retention_days"]
       });
 
       if (!cacheRetentionPayloadToApply) {
@@ -2648,13 +2786,44 @@ function buildOrganizationSecurityConfigurationPayload(
     description: configuration.description
   };
 
-  if (configuration.advanced_security !== undefined) {
+  // GitHub API rejects advanced_security when granular fields are provided.
+  const hasGranularAdvancedSecurityFields =
+    configuration.code_security !== undefined || configuration.secret_protection !== undefined;
+  if (configuration.advanced_security !== undefined && !hasGranularAdvancedSecurityFields) {
     payload.advanced_security = configuration.advanced_security;
   }
 
+  const isSecretScanningEnabled = configuration.secret_scanning === "enabled";
   for (const field of SECURITY_CONFIGURATION_STATUS_FIELDS) {
-    const value = configuration[field];
+    let value = configuration[field];
     if (value !== undefined) {
+      if (field === "dependabot_delegated_alert_dismissal" && value === "enabled") {
+        if (configuration.dependabot_alerts !== "enabled") {
+          throw new Error(
+            `security configuration "${configuration.name}" field "${field}" cannot be enabled when dependabot_alerts is not enabled`
+          );
+        }
+
+        if (!isCodeSecurityEffectivelyEnabled(configuration)) {
+          throw new Error(
+            `security configuration "${configuration.name}" field "${field}" cannot be enabled when code security is not enabled`
+          );
+        }
+      }
+
+      if (SECRET_SCANNING_DEPENDENT_STATUS_FIELDS.has(field) && !isSecretScanningEnabled) {
+        if (value === "enabled") {
+          throw new Error(
+            `security configuration "${configuration.name}" field "${field}" cannot be enabled when secret_scanning is not enabled`
+          );
+        }
+
+        // GitHub API currently rejects "not_set" for these sub-controls when secret scanning is disabled.
+        if (value === "not_set") {
+          value = "disabled";
+        }
+      }
+
       payload[field] = value;
     }
   }
@@ -3706,15 +3875,129 @@ async function callApi(options: {
     log(label);
   }
 
-  const response = await octokit.request(endpoint, {
-    ...routeParams,
-    ...(payload ?? {}),
-    headers: {
-      "X-GitHub-Api-Version": apiVersion
-    }
-  });
+  let response: { data: unknown };
+  try {
+    response = await octokit.request(endpoint, {
+      ...routeParams,
+      ...(payload ?? {}),
+      headers: {
+        "X-GitHub-Api-Version": apiVersion
+      }
+    });
+  } catch (error: unknown) {
+    const endpointLabel = `${method} ${renderEndpoint(endpoint, routeParams)}`;
+    const detail = formatApiErrorDetail(error);
+    throw new Error(`${label} failed (${endpointLabel}): ${detail}`);
+  }
 
   return response.data;
+}
+
+function formatApiErrorDetail(error: unknown): string {
+  const defaultMessage = getErrorMessage(error);
+  if (!error || typeof error !== "object") {
+    return defaultMessage;
+  }
+
+  const errorObject = error as {
+    status?: number;
+    response?: {
+      data?: unknown;
+      headers?: Record<string, string | string[] | undefined>;
+    };
+  };
+
+  const parts: string[] = [];
+  if (typeof errorObject.status === "number") {
+    parts.push(`HTTP ${errorObject.status}`);
+  }
+
+  const responseData = errorObject.response?.data;
+  if (responseData && typeof responseData === "object" && !Array.isArray(responseData)) {
+    const data = responseData as {
+      message?: unknown;
+      errors?: unknown;
+      documentation_url?: unknown;
+    };
+
+    if (typeof data.message === "string" && data.message.trim().length > 0) {
+      parts.push(data.message.trim());
+    }
+
+    if (Array.isArray(data.errors) && data.errors.length > 0) {
+      const mappedErrors = data.errors
+        .map((item) => formatApiValidationError(item))
+        .filter((value): value is string => Boolean(value && value.trim().length > 0));
+
+      if (mappedErrors.length > 0) {
+        parts.push(`errors: ${mappedErrors.join("; ")}`);
+      } else {
+        parts.push(`errors: ${JSON.stringify(data.errors)}`);
+      }
+    }
+
+    if (typeof data.documentation_url === "string" && data.documentation_url.trim().length > 0) {
+      parts.push(data.documentation_url.trim());
+    }
+  }
+
+  if (parts.length === 0) {
+    return defaultMessage;
+  }
+
+  const joined = parts.join(" | ");
+  if (defaultMessage.trim().length === 0) {
+    return joined;
+  }
+
+  if (joined.includes(defaultMessage)) {
+    return joined;
+  }
+
+  return `${joined} | ${defaultMessage}`;
+}
+
+function formatApiValidationError(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const item = value as {
+    message?: unknown;
+    resource?: unknown;
+    field?: unknown;
+    code?: unknown;
+  };
+
+  const parts: string[] = [];
+  if (typeof item.message === "string" && item.message.trim().length > 0) {
+    parts.push(item.message.trim());
+  }
+
+  const location: string[] = [];
+  if (typeof item.resource === "string" && item.resource.trim().length > 0) {
+    location.push(item.resource.trim());
+  }
+  if (typeof item.field === "string" && item.field.trim().length > 0) {
+    location.push(item.field.trim());
+  }
+  if (location.length > 0) {
+    parts.push(`[${location.join(".")}]`);
+  }
+
+  if (typeof item.code === "string" && item.code.trim().length > 0) {
+    parts.push(`code=${item.code.trim()}`);
+  }
+
+  if (parts.length === 0) {
+    return null;
+  }
+
+  return parts.join(" ");
 }
 
 function asJsonObject(value: unknown): JsonObject {

@@ -1,0 +1,409 @@
+name: Reusable Rust Release
+
+on:
+  workflow_call:
+    inputs:
+      rust-toolchain:
+        description: "Rust toolchain version (for example: stable, 1.94.0)"
+        type: string
+        required: false
+        default: stable
+      validate-runs-on:
+        description: Runner used for validate job
+        type: string
+        required: false
+        default: ubuntu-latest
+      validate-linux-packages:
+        description: apt packages to install during validation (Linux only)
+        type: string
+        required: false
+        default: ""
+      validate-fmt-command:
+        description: Formatting check command
+        type: string
+        required: false
+        default: cargo fmt --all -- --check
+      validate-clippy-command:
+        description: Clippy command
+        type: string
+        required: false
+        default: cargo clippy --all-targets --all-features -- -D warnings
+      validate-test-command:
+        description: Test command
+        type: string
+        required: false
+        default: cargo test --all-features
+      validate-build-command:
+        description: Optional build command for validate job (empty to skip)
+        type: string
+        required: false
+        default: ""
+      binary-matrix-json:
+        description: >
+          JSON matrix for release builds.
+          Required keys per item: name, os, target, binary, archive.
+          Optional key: cargo_args.
+        type: string
+        required: false
+        default: "[]"
+      build-linux-packages:
+        description: apt packages to install during build jobs (Linux only)
+        type: string
+        required: false
+        default: ""
+      build-matrix-default-cargo-args:
+        description: Default extra args used when matrix item omits cargo_args
+        type: string
+        required: false
+        default: --release
+      enable-macos-universal:
+        description: Build macOS universal binary from two uploaded artifacts
+        type: boolean
+        required: false
+        default: false
+      macos-universal-binary:
+        description: Binary filename to combine with lipo (for example agentmail)
+        type: string
+        required: false
+        default: ""
+      macos-universal-arm64-artifact:
+        description: Artifact name containing arm64 binary archive
+        type: string
+        required: false
+        default: macos-aarch64
+      macos-universal-arm64-archive:
+        description: Archive filename inside arm64 artifact (for example app-macos-aarch64.tar.gz)
+        type: string
+        required: false
+        default: ""
+      macos-universal-x86_64-artifact:
+        description: Artifact name containing x86_64 binary archive
+        type: string
+        required: false
+        default: macos-x86_64
+      macos-universal-x86_64-archive:
+        description: Archive filename inside x86_64 artifact (for example app-macos-x86_64.tar.gz)
+        type: string
+        required: false
+        default: ""
+      macos-universal-output-archive:
+        description: Output archive filename for universal binary
+        type: string
+        required: false
+        default: ""
+      macos-universal-artifact-name:
+        description: Artifact name for uploaded universal archive
+        type: string
+        required: false
+        default: macos-universal
+      create-github-release:
+        description: Create GitHub release and upload collected assets
+        type: boolean
+        required: false
+        default: true
+      release-assets-glob:
+        description: >
+          Optional newline-separated glob patterns (filename-only, relative to artifacts dir)
+          used to filter release assets. Empty means *.tar.gz and *.zip.
+        type: string
+        required: false
+        default: ""
+      generate-release-notes:
+        description: Enable GitHub generated release notes
+        type: boolean
+        required: false
+        default: true
+      release-name:
+        description: Optional release name override (empty uses tag)
+        type: string
+        required: false
+        default: ""
+      release-draft:
+        description: Create draft release
+        type: boolean
+        required: false
+        default: false
+      release-prerelease:
+        description: Mark release as prerelease
+        type: boolean
+        required: false
+        default: false
+      publish-crates-io:
+        description: Publish crate after validation
+        type: boolean
+        required: false
+        default: false
+      publish-runs-on:
+        description: Runner used for crates.io publish job
+        type: string
+        required: false
+        default: ubuntu-latest
+      publish-linux-packages:
+        description: apt packages to install before publish (Linux only)
+        type: string
+        required: false
+        default: ""
+      update-lockfile:
+        description: Run cargo generate-lockfile before publish
+        type: boolean
+        required: false
+        default: true
+      cargo-publish-command:
+        description: Cargo publish command (for example cargo publish -p mycrate)
+        type: string
+        required: false
+        default: cargo publish
+    secrets:
+      CARGO_REGISTRY_TOKEN:
+        required: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: Validate Release
+    runs-on: ${{ inputs.validate-runs-on }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+          components: rustfmt,clippy
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-release-validate-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux' && inputs.validate-linux-packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ inputs.validate-linux-packages }}
+
+      - name: Check formatting
+        run: ${{ inputs.validate-fmt-command }}
+
+      - name: Run clippy
+        run: ${{ inputs.validate-clippy-command }}
+
+      - name: Run tests
+        run: ${{ inputs.validate-test-command }}
+
+      - name: Optional validate build
+        if: inputs.validate-build-command != ''
+        run: ${{ inputs.validate-build-command }}
+
+  build-binaries:
+    name: Build (${{ matrix.name }})
+    if: inputs.binary-matrix-json != '[]'
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.binary-matrix-json) }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-release-build-${{ matrix.os }}-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux' && inputs.build-linux-packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ inputs.build-linux-packages }}
+
+      - name: Build release binary
+        run: cargo build --target ${{ matrix.target }} ${{ matrix.cargo_args || inputs.build-matrix-default-cargo-args }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "target/${{ matrix.target }}/release"
+          tar czf "../../../${{ matrix.archive }}" "${{ matrix.binary }}"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.binary }}" -DestinationPath "${{ matrix.archive }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.archive }}
+
+  build-macos-universal:
+    name: Build (macos-universal)
+    if: inputs.enable-macos-universal
+    needs: build-binaries
+    runs-on: macos-latest
+
+    steps:
+      - name: Validate universal inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for value in \
+            "${{ inputs.macos-universal-binary }}" \
+            "${{ inputs.macos-universal-arm64-archive }}" \
+            "${{ inputs.macos-universal-x86_64-archive }}" \
+            "${{ inputs.macos-universal-output-archive }}"
+          do
+            if [ -z "$value" ]; then
+              echo "::error::Universal build input is missing"
+              exit 1
+            fi
+          done
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create universal binary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p work
+          cd work
+
+          tar xzf "../artifacts/${{ inputs.macos-universal-arm64-artifact }}/${{ inputs.macos-universal-arm64-archive }}"
+          mv "${{ inputs.macos-universal-binary }}" "${{ inputs.macos-universal-binary }}-arm64"
+
+          tar xzf "../artifacts/${{ inputs.macos-universal-x86_64-artifact }}/${{ inputs.macos-universal-x86_64-archive }}"
+          mv "${{ inputs.macos-universal-binary }}" "${{ inputs.macos-universal-binary }}-x86_64"
+
+          lipo -create \
+            -output "${{ inputs.macos-universal-binary }}" \
+            "${{ inputs.macos-universal-binary }}-arm64" \
+            "${{ inputs.macos-universal-binary }}-x86_64"
+
+          file "${{ inputs.macos-universal-binary }}"
+          tar czf "../${{ inputs.macos-universal-output-archive }}" "${{ inputs.macos-universal-binary }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.macos-universal-artifact-name }}
+          path: ${{ inputs.macos-universal-output-archive }}
+
+  create-release:
+    name: Create GitHub Release
+    if: |
+      inputs.create-github-release &&
+      always() &&
+      needs.build-binaries.result == 'success' &&
+      (needs.build-macos-universal.result == 'success' || needs.build-macos-universal.result == 'skipped')
+    needs:
+      - build-binaries
+      - build-macos-universal
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release assets
+        shell: bash
+        env:
+          ASSET_GLOBS: ${{ inputs.release-assets-glob }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p release
+
+          if [ -n "$ASSET_GLOBS" ]; then
+            while IFS= read -r pattern; do
+              if [ -z "$pattern" ]; then
+                continue
+              fi
+              find artifacts -type f -name "$pattern" -print -exec cp "{}" release/ \;
+            done <<< "$ASSET_GLOBS"
+          else
+            find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print -exec cp "{}" release/ \;
+          fi
+
+          if [ -z "$(ls -A release)" ]; then
+            echo "::error::No release assets were collected"
+            exit 1
+          fi
+
+          ls -lh release/
+
+      - name: Create release (tag name)
+        if: inputs.release-name == ''
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: ${{ inputs.release-draft }}
+          prerelease: ${{ inputs.release-prerelease }}
+          generate_release_notes: ${{ inputs.generate-release-notes }}
+          files: release/*
+
+      - name: Create release (custom name)
+        if: inputs.release-name != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ inputs.release-name }}
+          draft: ${{ inputs.release-draft }}
+          prerelease: ${{ inputs.release-prerelease }}
+          generate_release_notes: ${{ inputs.generate-release-notes }}
+          files: release/*
+
+  publish-crates-io:
+    name: Publish to crates.io
+    if: inputs.publish-crates-io
+    needs: validate
+    runs-on: ${{ inputs.publish-runs-on }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux' && inputs.publish-linux-packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ inputs.publish-linux-packages }}
+
+      - name: Update lockfile
+        if: inputs.update-lockfile
+        run: cargo generate-lockfile
+
+      - name: Verify crates.io token
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${{ secrets.CARGO_REGISTRY_TOKEN }}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is required when publish-crates-io is true"
+            exit 1
+          fi
+
+      - name: Publish crate
+        run: ${{ inputs.cargo-publish-command }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

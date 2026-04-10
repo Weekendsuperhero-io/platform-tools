@@ -8,6 +8,8 @@ This directory contains reusable workflows that can be called from other reposit
 | -------------- | ----------------------------- | -------------------------------------------------------- |
 | PR Description | `reusable-pr-description.yml` | Auto-generates PR titles and descriptions using Jules AI |
 | Changelog      | `reusable-changelog.yml`      | Auto-generates changelog entries and creates a PR        |
+| Rust CI        | `reusable-rust-ci.yml`        | Shared Rust CI checks, docs, and optional target builds  |
+| Rust Release   | `reusable-rust-release.yml`   | Shared Rust release validation, packaging, release, and crates publish |
 
 ## Quick Start
 
@@ -71,6 +73,84 @@ jobs:
 - Inserts entries under `## [Unreleased]` (Keep a Changelog format)
 - Creates a PR with the updated changelog
 
+### 3. Rust CI (Reusable)
+
+Add this to your consuming repo at `.github/workflows/ci.yml`:
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-rust-ci.yml@main
+    with:
+      check-os-json: '["ubuntu-latest","macos-latest","windows-latest"]'
+      docs-os: ubuntu-latest
+      linux-packages: "libdbus-1-dev pkg-config"
+      build-matrix-json: "[]"
+```
+
+`eventkit-rs` style target builds in CI:
+
+```yaml
+jobs:
+  ci:
+    uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-rust-ci.yml@main
+    with:
+      check-os-json: '["macos-latest"]'
+      docs-os: macos-latest
+      build-matrix-json: >-
+        [
+          {"os":"macos-latest","target":"x86_64-apple-darwin","cargo_args":"--release"},
+          {"os":"macos-latest","target":"aarch64-apple-darwin","cargo_args":"--release"}
+        ]
+```
+
+### 4. Rust Release (Reusable)
+
+Add this to your consuming repo at `.github/workflows/release.yml`:
+
+```yaml
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-rust-release.yml@main
+    with:
+      validate-runs-on: ubuntu-latest
+      validate-linux-packages: "libdbus-1-dev pkg-config"
+      binary-matrix-json: >-
+        [
+          {"name":"linux-x86_64","os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","binary":"agentmail","archive":"agentmail-linux-x86_64.tar.gz"},
+          {"name":"linux-aarch64","os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","binary":"agentmail","archive":"agentmail-linux-aarch64.tar.gz"},
+          {"name":"macos-x86_64","os":"macos-latest","target":"x86_64-apple-darwin","binary":"agentmail","archive":"agentmail-macos-x86_64.tar.gz"},
+          {"name":"macos-aarch64","os":"macos-latest","target":"aarch64-apple-darwin","binary":"agentmail","archive":"agentmail-macos-aarch64.tar.gz"},
+          {"name":"windows-x86_64","os":"windows-latest","target":"x86_64-pc-windows-msvc","binary":"agentmail.exe","archive":"agentmail-windows-x86_64.zip"}
+        ]
+      enable-macos-universal: true
+      macos-universal-binary: agentmail
+      macos-universal-arm64-artifact: macos-aarch64
+      macos-universal-arm64-archive: agentmail-macos-aarch64.tar.gz
+      macos-universal-x86_64-artifact: macos-x86_64
+      macos-universal-x86_64-archive: agentmail-macos-x86_64.tar.gz
+      macos-universal-output-archive: agentmail-macos-universal.tar.gz
+      publish-crates-io: true
+      cargo-publish-command: cargo publish -p agentmail
+    secrets:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+```
+
 ## Configuration Options
 
 ### PR Description Workflow
@@ -101,9 +181,45 @@ jobs:
 | `pr-title`              | `docs: update CHANGELOG.md` | Title for the generated PR                       |
 | `pr-body-template`      | _(auto)_                    | Body template (`{0}` is interpolated)            |
 
+### Rust CI Workflow
+
+| Input                             | Default                                      | Description                                              |
+| --------------------------------- | -------------------------------------------- | -------------------------------------------------------- |
+| `rust-toolchain`                  | `stable`                                     | Rust version/toolchain                                   |
+| `check-os-json`                   | `["ubuntu-latest"]`                          | Runner matrix for fmt/clippy/build/test                  |
+| `docs-os`                         | `ubuntu-latest`                              | Runner for docs job                                      |
+| `linux-packages`                  | _(empty)_                                    | Linux apt packages installed where needed                |
+| `fmt-command`                     | `cargo fmt --all -- --check`                | Format check command                                     |
+| `clippy-command`                  | `cargo clippy --all-targets --all-features -- -D warnings` | Clippy command                               |
+| `build-command`                   | `cargo build --all-features`                | Build command                                            |
+| `test-command`                    | `cargo test --all-features`                 | Test command                                             |
+| `run-docs`                        | `true`                                       | Enable docs job                                          |
+| `docs-command`                    | `cargo doc --no-deps --all-features`        | Docs command (`RUSTDOCFLAGS=-D warnings` is applied)     |
+| `build-matrix-json`               | `[]`                                         | Optional target build matrix (JSON array)                |
+| `build-matrix-default-cargo-args` | `--release`                                  | Fallback cargo args for build matrix entries             |
+
+### Rust Release Workflow
+
+| Input                               | Default                     | Description                                                |
+| ----------------------------------- | --------------------------- | ---------------------------------------------------------- |
+| `validate-runs-on`                  | `ubuntu-latest`             | Runner for release validation                              |
+| `validate-linux-packages`           | _(empty)_                   | Linux apt packages for validation                          |
+| `binary-matrix-json`                | `[]`                        | Release build matrix (JSON array with name/os/target/etc) |
+| `build-linux-packages`              | _(empty)_                   | Linux apt packages for binary build jobs                   |
+| `build-matrix-default-cargo-args`   | `--release`                 | Fallback cargo args for matrix entries                     |
+| `enable-macos-universal`            | `false`                     | Build universal macOS binary with `lipo`                  |
+| `create-github-release`             | `true`                      | Publish GitHub release from uploaded artifacts             |
+| `release-assets-glob`               | _(empty)_                   | Optional newline-separated filename globs                  |
+| `publish-crates-io`                 | `false`                     | Publish to crates.io                                       |
+| `cargo-publish-command`             | `cargo publish`             | Publish command override                                   |
+| `release-name`                      | _(empty)_                   | Optional release title override                            |
+| `generate-release-notes`            | `true`                      | Enable generated GitHub release notes                      |
+| `release-draft`                     | `false`                     | Create draft release                                       |
+| `release-prerelease`                | `false`                     | Mark release as prerelease                                 |
+
 ## Required Secrets
 
-Both workflows require:
+Jules workflows require:
 
 | Secret          | Required | Description                                             |
 | --------------- | -------- | ------------------------------------------------------- |
@@ -111,6 +227,12 @@ Both workflows require:
 | `GITHUB_TOKEN`  | Yes      | GitHub token (provided automatically by GitHub Actions) |
 
 Add `JULES_API_KEY` to your repo's **Settings → Secrets and variables → Actions**.
+
+Rust release workflow requires:
+
+| Secret                  | Required | Description                                            |
+| ----------------------- | -------- | ------------------------------------------------------ |
+| `CARGO_REGISTRY_TOKEN`  | Only when `publish-crates-io=true` | crates.io API token for `cargo publish` |
 
 ## Architecture
 
@@ -121,6 +243,8 @@ Add `JULES_API_KEY` to your repo's **Settings → Secrets and variables → Acti
 │  .github/workflows/          │
 │    pr-description.yml ───────┼──┐
 │    changelog.yml ────────────┼──┐
+│    ci.yml ───────────────────┼──┐
+│    release.yml ──────────────┼──┐
 └──────────────────────────────┘  │
                                   │ workflow_call
                                   ▼
@@ -130,6 +254,8 @@ Add `JULES_API_KEY` to your repo's **Settings → Secrets and variables → Acti
 │  .github/workflows/          │
 │    reusable-pr-description.yml│
 │    reusable-changelog.yml    │
+│    reusable-rust-ci.yml      │
+│    reusable-rust-release.yml │
 │                              │
 │  .github/actions/            │
 │    jules-ai/action.yml ──────┼──┐ (composite action)

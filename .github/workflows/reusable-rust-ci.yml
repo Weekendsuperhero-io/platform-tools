@@ -1,0 +1,176 @@
+name: Reusable Rust CI
+
+on:
+  workflow_call:
+    inputs:
+      rust-toolchain:
+        description: "Rust toolchain version (for example: stable, 1.94.0)"
+        type: string
+        required: false
+        default: stable
+      rust-components:
+        description: Comma-separated Rust components to install
+        type: string
+        required: false
+        default: rustfmt,clippy
+      check-os-json:
+        description: JSON array of runners for fmt/clippy/build/test
+        type: string
+        required: false
+        default: '["ubuntu-latest"]'
+      docs-os:
+        description: Runner used for documentation build
+        type: string
+        required: false
+        default: ubuntu-latest
+      linux-packages:
+        description: apt packages to install on Linux runners
+        type: string
+        required: false
+        default: ""
+      fmt-command:
+        description: Formatting check command
+        type: string
+        required: false
+        default: cargo fmt --all -- --check
+      clippy-command:
+        description: Clippy command
+        type: string
+        required: false
+        default: cargo clippy --all-targets --all-features -- -D warnings
+      build-command:
+        description: Build command for the check job
+        type: string
+        required: false
+        default: cargo build --all-features
+      test-command:
+        description: Test command for the check job
+        type: string
+        required: false
+        default: cargo test --all-features
+      run-docs:
+        description: Whether to run docs job
+        type: boolean
+        required: false
+        default: true
+      docs-command:
+        description: Documentation build command
+        type: string
+        required: false
+        default: cargo doc --no-deps --all-features
+      build-matrix-json:
+        description: >
+          Optional JSON matrix for target builds, e.g.
+          [{"os":"macos-latest","target":"x86_64-apple-darwin","cargo_args":"--release"}]
+        type: string
+        required: false
+        default: "[]"
+      build-matrix-default-cargo-args:
+        description: Default extra args used by build matrix entries without cargo_args
+        type: string
+        required: false
+        default: --release
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.check-os-json) }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+          components: ${{ inputs.rust-components }}
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-ci-${{ matrix.os }}
+          cache-on-failure: true
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux' && inputs.linux-packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ inputs.linux-packages }}
+
+      - name: Check formatting
+        run: ${{ inputs.fmt-command }}
+
+      - name: Run clippy
+        run: ${{ inputs.clippy-command }}
+
+      - name: Build
+        run: ${{ inputs.build-command }}
+
+      - name: Run tests
+        run: ${{ inputs.test-command }}
+
+  build-targets:
+    name: Build (${{ matrix.target }})
+    if: inputs.build-matrix-json != '[]'
+    needs: check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.build-matrix-json) }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-ci-build-${{ matrix.os }}-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux' && inputs.linux-packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ inputs.linux-packages }}
+
+      - name: Build target
+        run: cargo build --target ${{ matrix.target }} ${{ matrix.cargo_args || inputs.build-matrix-default-cargo-args }}
+
+  docs:
+    name: Documentation
+    if: inputs.run-docs
+    runs-on: ${{ inputs.docs-os }}
+    needs: check
+    env:
+      RUSTDOCFLAGS: -D warnings
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-ci-docs-${{ inputs.docs-os }}
+          cache-on-failure: true
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux' && inputs.linux-packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ inputs.linux-packages }}
+
+      - name: Build documentation
+        run: ${{ inputs.docs-command }}

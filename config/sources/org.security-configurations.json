@@ -3,7 +3,6 @@
     "public-max": {
       "name": "public-max",
       "description": "Maximum built-in security coverage for public repositories.",
-      "advanced_security": "enabled",
       "code_security": "enabled",
       "secret_protection": "enabled",
       "dependency_graph": "enabled",
@@ -34,14 +33,13 @@
     "private-team-free": {
       "name": "private-team-free",
       "description": "Cost-aware baseline for private and internal repositories on GitHub Team.",
-      "advanced_security": "disabled",
       "code_security": "disabled",
       "secret_protection": "disabled",
       "dependency_graph": "enabled",
       "dependency_graph_autosubmit_action": "enabled",
       "dependabot_alerts": "enabled",
       "dependabot_security_updates": "enabled",
-      "dependabot_delegated_alert_dismissal": "enabled",
+      "dependabot_delegated_alert_dismissal": "disabled",
       "code_scanning_default_setup": "disabled",
       "code_scanning_delegated_alert_dismissal": "not_set",
       "secret_scanning": "disabled",
@@ -62,7 +60,6 @@
     "private-team-paid": {
       "name": "private-team-paid",
       "description": "Paid security baseline for private and internal repositories on GitHub Team.",
-      "advanced_security": "enabled",
       "code_security": "enabled",
       "secret_protection": "enabled",
       "dependency_graph": "enabled",
@@ -93,7 +90,6 @@
     "private-team-requires-ghec": {
       "name": "private-team-requires-ghec",
       "description": "Enterprise-oriented private baseline that uses labeled code scanning runners and advanced setup.",
-      "advanced_security": "enabled",
       "code_security": "enabled",
       "secret_protection": "enabled",
       "dependency_graph": "enabled",

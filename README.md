@@ -257,13 +257,14 @@ Supported org governance/security-default settings via `PATCH /orgs/{org}`.
 Common fields:
 
 - org profile fields (`name`, `description`, `company`, `location`, `email`, `blog`, etc.)
-- repository creation/permission defaults (`default_repository_permission`, `members_can_create_*`, `members_allowed_repository_creation_type`)
-- policy/security defaults for new repositories (`advanced_security_enabled_for_new_repositories`, `dependabot_*`, `dependency_graph_*`, `secret_scanning_*`)
+- repository creation/permission defaults (`default_repository_permission`, `members_can_create_*`)
 
 Apply behavior:
 
 - default: reads current org settings and only PATCHes changed keys
 - `--force`: PATCHes all configured `org.settings` keys regardless of current value
+- deprecated org API fields are ignored with a warning (including `members_allowed_repository_creation_type` and org-level new-repo security product toggles); use `org.security_configurations` defaults instead
+- `members_can_create_internal_repositories` is automatically skipped on Team orgs where internal repositories are unsupported
 
 ### `org.actions`
 
@@ -341,6 +342,10 @@ Supported config fields include:
 - code scanning options (`code_scanning_options`, `code_scanning_default_setup_options`)
 - secret scanning delegated bypass reviewers (`secret_scanning_delegated_bypass_options.reviewers`)
 - policy controls (`enforcement`, `attach`, `default_for_new_repos`)
+
+When `code_security` or `secret_protection` is set, the CLI omits `advanced_security` in API payloads to match current REST API validation rules.
+When `secret_scanning` is not `enabled`, the CLI normalizes secret-scanning sub-controls (`*_validity_checks`, `*_non_provider_patterns`, `*_generic_secrets`, delegated alert dismissal, extended metadata) from `not_set` to `disabled` in API payloads to satisfy current REST validation.
+`dependabot_delegated_alert_dismissal` can only be `enabled` when both `dependabot_alerts` and code security are enabled.
 
 Note: some UI-only toggles (for example malware alerts) are not currently exposed in this REST endpoint and are not managed by the CLI.
 On Team orgs with internal repositories disabled, `private_or_internal` / `private_and_internal` semantics apply to private repositories only in practice.
