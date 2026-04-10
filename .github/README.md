@@ -228,6 +228,8 @@ jobs:
 | `release-draft`                     | `false`                     | Create draft release                                       |
 | `release-prerelease`                | `false`                     | Mark release as prerelease                                 |
 
+`create-github-release` uses a GitHub App token when `JULES_PR_CLIENT_ID` and `JULES_PR_PRIVATE_KEY` are provided; otherwise it falls back to `github.token`.
+
 ## Required Secrets
 
 Jules workflows require:
@@ -245,6 +247,8 @@ Rust release workflow requires:
 | Secret                  | Required | Description                                            |
 | ----------------------- | -------- | ------------------------------------------------------ |
 | `CARGO_REGISTRY_TOKEN`  | Only when `publish-crates-io=true` | crates.io API token for `cargo publish` |
+| `JULES_PR_CLIENT_ID`    | Optional | GitHub App ID/client ID used for GitHub release writes |
+| `JULES_PR_PRIVATE_KEY`  | Optional | GitHub App private key PEM paired with `JULES_PR_CLIENT_ID` |
 
 Caller workflows can either pass named secrets explicitly (`secrets: { ... }`) or use `secrets: inherit`.
 `secrets: inherit` is set in the caller job that uses the reusable workflow and is supported for repositories in the same organization or enterprise.

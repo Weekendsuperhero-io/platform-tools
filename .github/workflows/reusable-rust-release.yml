@@ -172,6 +172,10 @@ on:
     secrets:
       CARGO_REGISTRY_TOKEN:
         required: false
+      JULES_PR_CLIENT_ID:
+        required: false
+      JULES_PR_PRIVATE_KEY:
+        required: false
 
 permissions:
   contents: read
@@ -481,10 +485,75 @@ jobs:
       - build-binaries
       - build-macos-universal
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
+      - name: Validate release auth inputs
+        id: release-auth
+        shell: bash
+        env:
+          APP_ID: ${{ secrets.JULES_PR_CLIENT_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.JULES_PR_PRIVATE_KEY }}
+          GITHUB_TOKEN_FALLBACK: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          has_app_id=false
+          has_private_key=false
+
+          if [ -n "$APP_ID" ]; then
+            has_app_id=true
+          fi
+          if [ -n "$APP_PRIVATE_KEY" ]; then
+            has_private_key=true
+          fi
+
+          if [ "$has_app_id" = true ] && [ "$has_private_key" = true ]; then
+            echo "use_app=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$has_app_id" = false ] && [ "$has_private_key" = false ]; then
+            echo "use_app=false" >> "$GITHUB_OUTPUT"
+            echo "token=$GITHUB_TOKEN_FALLBACK" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::error::Set both JULES_PR_CLIENT_ID and JULES_PR_PRIVATE_KEY, or neither."
+          exit 1
+
+      - name: Create GitHub App token
+        id: app-token
+        if: steps.release-auth.outputs.use_app == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.JULES_PR_CLIENT_ID }}
+          private-key: ${{ secrets.JULES_PR_PRIVATE_KEY }}
+
+      - name: Finalize release token
+        id: release-token
+        shell: bash
+        env:
+          USE_APP: ${{ steps.release-auth.outputs.use_app }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          FALLBACK_TOKEN: ${{ steps.release-auth.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          if [ "$USE_APP" = "true" ]; then
+            if [ -z "$APP_TOKEN" ]; then
+              echo "::error::Failed to create GitHub App token"
+              exit 1
+            fi
+            echo "token=$APP_TOKEN" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "$FALLBACK_TOKEN" ]; then
+            echo "::error::GITHUB_TOKEN fallback is empty"
+            exit 1
+          fi
+          echo "token=$FALLBACK_TOKEN" >> "$GITHUB_OUTPUT"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -521,6 +590,7 @@ jobs:
         if: inputs.release-name == ''
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ steps.release-token.outputs.token }}
           draft: ${{ inputs.release-draft }}
           prerelease: ${{ inputs.release-prerelease }}
           generate_release_notes: ${{ inputs.generate-release-notes }}
@@ -530,6 +600,7 @@ jobs:
         if: inputs.release-name != ''
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ steps.release-token.outputs.token }}
           name: ${{ inputs.release-name }}
           draft: ${{ inputs.release-draft }}
           prerelease: ${{ inputs.release-prerelease }}
