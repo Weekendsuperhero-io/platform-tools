@@ -10,7 +10,6 @@ jobs:
   update-changelog:
     permissions:
       contents: write
-      pull-requests: write
     uses: ./.github/workflows/reusable-changelog.yml
     with:
       changelog-path: CHANGELOG.md

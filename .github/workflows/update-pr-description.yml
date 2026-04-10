@@ -11,7 +11,6 @@ jobs:
   update-pr:
     permissions:
       contents: read
-      pull-requests: write
     uses: ./.github/workflows/reusable-pr-description.yml
     with:
       trigger-phrase: "@agent pr-title"

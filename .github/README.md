@@ -28,7 +28,6 @@ jobs:
   update-pr:
     permissions:
       contents: read
-      pull-requests: write
     uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-pr-description.yml@main
     with:
       trigger-phrase: "@agent pr-title" # optional — only runs if this phrase is in the PR body
@@ -59,7 +58,6 @@ jobs:
   changelog:
     permissions:
       contents: write
-      pull-requests: write
     uses: <owner>/<repo>/.github/workflows/reusable-changelog.yml@main
     with:
       changelog-path: CHANGELOG.md
@@ -249,6 +247,7 @@ Client secret alone is not sufficient; you need the app private key.
 GitHub App permissions for PR description/changelog automation: `Pull requests: Read and write`; add `Contents: Read and write` when creating commit branches/PRs (for changelog), and at least `Contents: Read` for checkout operations with app token.
 When GitHub App auth is used in changelog workflow, commits are authored/committed as `<app-slug>[bot] <id+app-slug[bot]@users.noreply.github.com>`.
 Permissions are separate from secrets: set explicit `permissions` in both caller and reusable workflows for least privilege.
+These reusable workflows intentionally do not request `pull-requests: write` for `GITHUB_TOKEN`; PR updates should run through the configured GitHub App token.
 
 ## Architecture
 

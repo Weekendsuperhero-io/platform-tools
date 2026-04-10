@@ -13,7 +13,6 @@
 #   changelog:
 #     permissions:
 #       contents: write
-#       pull-requests: write
 #     uses: <owner>/<repo>/.github/workflows/reusable-changelog.yml@main
 #     with:
 #       changelog-path: CHANGELOG.md          # optional
@@ -99,7 +98,6 @@ jobs:
 
     permissions:
       contents: write
-      pull-requests: write
 
     steps:
       - name: Validate GitHub App secret configuration
