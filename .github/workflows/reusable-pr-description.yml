@@ -158,11 +158,17 @@ jobs:
           # Diff stats
           git diff --stat "${BASE_REF}"...HEAD | tail -1 > /tmp/diff_stat.txt
 
-          # Build diff command with patterns
-          PATTERNS_ARRAY=($PATTERNS)
-          EXCLUDES_ARRAY=($EXCLUDES)
+          # Build diff command with pathspec include/exclude patterns.
+          # Inputs may contain shell-style quotes; remove literal quote chars first.
+          PATTERNS_CLEAN=${PATTERNS//\'/}
+          EXCLUDES_CLEAN=${EXCLUDES//\'/}
+          # shellcheck disable=SC2206
+          PATTERNS_ARRAY=($PATTERNS_CLEAN)
+          # shellcheck disable=SC2206
+          EXCLUDES_ARRAY=($EXCLUDES_CLEAN)
 
           git diff "${BASE_REF}"...HEAD \
+            -- \
             "${PATTERNS_ARRAY[@]}" \
             "${EXCLUDES_ARRAY[@]}" \
             | head -n "$MAX_DIFF" > /tmp/diff.txt
