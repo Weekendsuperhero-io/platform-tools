@@ -103,6 +103,7 @@ jobs:
 
     steps:
       - name: Validate GitHub App secret configuration
+        id: app-auth-config
         shell: bash
         env:
           JULES_APP_ID: ${{ secrets.JULES_PR_CLIENT_ID }}
@@ -115,8 +116,14 @@ jobs:
             exit 1
           fi
 
+          ENABLED=false
+          if [ -n "${JULES_APP_ID}" ] && [ -n "${JULES_APP_KEY}" ]; then
+            ENABLED=true
+          fi
+          echo "enabled=${ENABLED}" >> "$GITHUB_OUTPUT"
+
       - name: Generate GitHub App token
-        if: secrets.JULES_PR_CLIENT_ID != '' && secrets.JULES_PR_PRIVATE_KEY != ''
+        if: steps.app-auth-config.outputs.enabled == 'true'
         id: app-token
         uses: actions/create-github-app-token@v2
         with:
