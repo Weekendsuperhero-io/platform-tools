@@ -1,86 +1,214 @@
 {
   "apiVersion": "2026-03-10",
-  "repository": {
-    "default_branch": {
-      "name": "main",
-      "rename_existing": true
-    },
-    "settings": {
-      "allow_auto_merge": true,
-      "allow_merge_commit": false,
-      "allow_rebase_merge": false,
-      "allow_squash_merge": true,
-      "allow_update_branch": true,
-      "delete_branch_on_merge": true,
-      "has_issues": true,
-      "has_projects": false,
-      "has_wiki": true,
-      "squash_merge_commit_message": "PR_BODY",
-      "squash_merge_commit_title": "PR_TITLE"
-    },
-    "topics": [
-      "managed-by-baseline"
-    ],
-    "security": {
-      "code_security": false,
-      "vulnerability_alerts": true,
-      "dependabot_security_updates": true,
-      "code_scanning_default_setup": {
-        "state": "not-configured",
-        "mode": "eligible"
+  "repo": {
+    "repository": {
+      "default_branch": {
+        "name": "main",
+        "rename_existing": true
+      },
+      "settings": {
+        "allow_auto_merge": true,
+        "allow_merge_commit": false,
+        "allow_rebase_merge": false,
+        "allow_squash_merge": true,
+        "allow_update_branch": true,
+        "delete_branch_on_merge": true,
+        "has_issues": true,
+        "has_projects": false,
+        "has_wiki": true,
+        "squash_merge_commit_message": "PR_BODY",
+        "squash_merge_commit_title": "PR_TITLE"
+      },
+      "topics": [
+        "managed-by-baseline"
+      ],
+      "security": {
+        "code_security": false,
+        "advanced_security": false,
+        "secret_scanning": false,
+        "secret_scanning_push_protection": false,
+        "vulnerability_alerts": true,
+        "dependabot_security_updates": true,
+        "code_scanning_default_setup": {
+          "state": "not-configured",
+          "mode": "eligible"
+        }
       }
     }
   },
-  "orgRulesets": [
-    {
-      "name": "Default branch protection",
-      "target": "branch",
-      "enforcement": "active",
-      "bypass_actors": [
-        {
-          "actor_id": null,
-          "actor_type": "OrganizationAdmin",
-          "bypass_mode": "always"
-        }
-      ],
-      "conditions": {
-        "repository_name": {
-          "include": [
-            "~ALL"
-          ],
-          "exclude": []
-        },
-        "ref_name": {
-          "include": [
-            "~DEFAULT_BRANCH"
-          ],
-          "exclude": []
-        }
-      },
-      "rules": [
-        {
-          "type": "deletion"
-        },
-        {
-          "type": "non_fast_forward"
-        },
-        {
-          "type": "required_linear_history"
-        },
-        {
-          "type": "pull_request",
-          "parameters": {
-            "allowed_merge_methods": [
-              "squash"
-            ],
-            "dismiss_stale_reviews_on_push": true,
-            "require_code_owner_review": true,
-            "require_last_push_approval": true,
-            "required_approving_review_count": 1,
-            "required_review_thread_resolution": true
+  "org": {
+    "rulesets": [
+      {
+        "name": "Default branch protection",
+        "target": "branch",
+        "enforcement": "active",
+        "bypass_actors": [
+          {
+            "actor_id": null,
+            "actor_type": "OrganizationAdmin",
+            "bypass_mode": "always"
           }
-        }
-      ]
-    }
-  ]
+        ],
+        "conditions": {
+          "repository_name": {
+            "include": [
+              "~ALL"
+            ],
+            "exclude": []
+          },
+          "ref_name": {
+            "include": [
+              "~DEFAULT_BRANCH"
+            ],
+            "exclude": []
+          }
+        },
+        "rules": [
+          {
+            "type": "deletion"
+          },
+          {
+            "type": "non_fast_forward"
+          },
+          {
+            "type": "required_linear_history"
+          },
+          {
+            "type": "pull_request",
+            "parameters": {
+              "allowed_merge_methods": [
+                "squash"
+              ],
+              "dismiss_stale_reviews_on_push": true,
+              "require_code_owner_review": true,
+              "require_last_push_approval": true,
+              "required_approving_review_count": 1,
+              "required_review_thread_resolution": true
+            }
+          }
+        ]
+      }
+    ],
+    "settings": {
+      "default_repository_permission": "read",
+      "members_can_create_repositories": true,
+      "members_can_create_public_repositories": true,
+      "members_can_create_private_repositories": true,
+      "members_can_create_internal_repositories": false,
+      "members_allowed_repository_creation_type": "all",
+      "members_can_fork_private_repositories": false,
+      "web_commit_signoff_required": false,
+      "default_repository_branch": "main",
+      "advanced_security_enabled_for_new_repositories": false,
+      "dependabot_alerts_enabled_for_new_repositories": true,
+      "dependabot_security_updates_enabled_for_new_repositories": true,
+      "dependency_graph_enabled_for_new_repositories": true,
+      "secret_scanning_enabled_for_new_repositories": false,
+      "secret_scanning_push_protection_enabled_for_new_repositories": false,
+      "secret_scanning_validity_checks_enabled": false
+    },
+    "actions": {
+      "permissions": {
+        "enabled_repositories": "all",
+        "allowed_actions": "selected"
+      },
+      "selected_actions": {
+        "github_owned_allowed": true,
+        "verified_allowed": true,
+        "patterns_allowed": []
+      },
+      "artifact_and_log_retention": {
+        "days": 30
+      },
+      "fork_pr_contributor_approval": {
+        "approval_policy": "all_external_contributors"
+      },
+      "fork_pr_private_repos": {
+        "run_workflows_from_fork_pull_requests": false,
+        "send_write_tokens_to_workflows": false,
+        "send_secrets_and_variables": false,
+        "require_approval_for_fork_pr_workflows": true
+      },
+      "workflow_permissions": {
+        "default_workflow_permissions": "read",
+        "can_approve_pull_request_reviews": false
+      },
+      "cache": {
+        "max_cache_size_gb": 10,
+        "max_cache_retention_days": 30
+      },
+      "runner_groups": []
+    },
+    "packages": {
+      "package_creation": {
+        "public": true,
+        "private": true,
+        "internal": true
+      },
+      "default_settings": {
+        "inherit_access_from_source_repository": "default"
+      }
+    },
+    "security_configurations": [
+      {
+        "name": "public-max",
+        "description": "Maximum built-in security coverage for public repositories.",
+        "advanced_security": "enabled",
+        "code_security": "enabled",
+        "secret_protection": "enabled",
+        "dependency_graph": "enabled",
+        "dependency_graph_autosubmit_action": "enabled",
+        "dependabot_alerts": "enabled",
+        "dependabot_security_updates": "enabled",
+        "dependabot_delegated_alert_dismissal": "enabled",
+        "code_scanning_default_setup": "enabled",
+        "code_scanning_default_setup_options": {
+          "runner_type": "standard"
+        },
+        "code_scanning_delegated_alert_dismissal": "enabled",
+        "secret_scanning": "enabled",
+        "secret_scanning_push_protection": "enabled",
+        "secret_scanning_delegated_bypass": "disabled",
+        "secret_scanning_validity_checks": "enabled",
+        "secret_scanning_non_provider_patterns": "enabled",
+        "secret_scanning_generic_secrets": "enabled",
+        "secret_scanning_delegated_alert_dismissal": "enabled",
+        "secret_scanning_extended_metadata": "enabled",
+        "private_vulnerability_reporting": "enabled",
+        "enforcement": "enforced",
+        "attach": {
+          "scope": "public"
+        },
+        "default_for_new_repos": "public"
+      },
+      {
+        "name": "private-team-free",
+        "description": "Cost-aware baseline for private and internal repositories on GitHub Team.",
+        "advanced_security": "disabled",
+        "code_security": "disabled",
+        "secret_protection": "disabled",
+        "dependency_graph": "enabled",
+        "dependency_graph_autosubmit_action": "enabled",
+        "dependabot_alerts": "enabled",
+        "dependabot_security_updates": "enabled",
+        "dependabot_delegated_alert_dismissal": "enabled",
+        "code_scanning_default_setup": "disabled",
+        "code_scanning_delegated_alert_dismissal": "not_set",
+        "secret_scanning": "disabled",
+        "secret_scanning_push_protection": "disabled",
+        "secret_scanning_delegated_bypass": "disabled",
+        "secret_scanning_validity_checks": "not_set",
+        "secret_scanning_non_provider_patterns": "not_set",
+        "secret_scanning_generic_secrets": "not_set",
+        "secret_scanning_delegated_alert_dismissal": "not_set",
+        "secret_scanning_extended_metadata": "not_set",
+        "private_vulnerability_reporting": "not_set",
+        "enforcement": "enforced",
+        "attach": {
+          "scope": "private_or_internal"
+        },
+        "default_for_new_repos": "private_and_internal"
+      }
+    ]
+  }
 }

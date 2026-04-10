@@ -1,0 +1,10 @@
+{
+  "package_creation": {
+    "public": true,
+    "private": true,
+    "internal": true
+  },
+  "default_settings": {
+    "inherit_access_from_source_repository": "default"
+  }
+}

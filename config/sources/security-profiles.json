@@ -1,0 +1,61 @@
+{
+  "public-max": {
+    "security": {
+      "code_security": true,
+      "advanced_security": true,
+      "secret_scanning": true,
+      "secret_scanning_push_protection": true,
+      "vulnerability_alerts": true,
+      "dependabot_security_updates": true,
+      "code_scanning_default_setup": {
+        "state": "configured",
+        "query_suite": "default",
+        "mode": "public-only"
+      }
+    }
+  },
+  "private-team-free": {
+    "security": {
+      "code_security": false,
+      "advanced_security": false,
+      "secret_scanning": false,
+      "secret_scanning_push_protection": false,
+      "vulnerability_alerts": true,
+      "dependabot_security_updates": true,
+      "code_scanning_default_setup": {
+        "state": "not-configured",
+        "mode": "eligible"
+      }
+    }
+  },
+  "private-team-paid": {
+    "security": {
+      "code_security": true,
+      "advanced_security": true,
+      "secret_scanning": true,
+      "secret_scanning_push_protection": true,
+      "vulnerability_alerts": true,
+      "dependabot_security_updates": true,
+      "code_scanning_default_setup": {
+        "state": "configured",
+        "query_suite": "default",
+        "mode": "eligible"
+      }
+    }
+  },
+  "private-team-requires-ghec": {
+    "security": {
+      "code_security": true,
+      "advanced_security": true,
+      "secret_scanning": true,
+      "secret_scanning_push_protection": true,
+      "vulnerability_alerts": true,
+      "dependabot_security_updates": true,
+      "code_scanning_default_setup": {
+        "state": "configured",
+        "query_suite": "extended",
+        "mode": "eligible"
+      }
+    }
+  }
+}

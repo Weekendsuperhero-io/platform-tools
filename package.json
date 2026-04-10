@@ -10,17 +10,39 @@
 	},
 	"scripts": {
 		"preinstall": "node scripts/enforce-pnpm.cjs",
+		"configs:generate": "node scripts/enforce-pnpm.cjs && node scripts/generate-configs.mjs",
+		"configs:check": "node scripts/enforce-pnpm.cjs && node scripts/generate-configs.mjs --check",
 		"build": "node scripts/enforce-pnpm.cjs && tsc -p tsconfig.json",
-		"check": "node scripts/enforce-pnpm.cjs && tsc -p tsconfig.json --noEmit",
+		"check": "node scripts/enforce-pnpm.cjs && tsc -p tsconfig.json --noEmit && node scripts/generate-configs.mjs --check",
 		"apply:baseline": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js",
-		"apply:low-cost": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/security-low-cost.json",
-		"apply": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/security-low-cost.json"
+		"snapshot:org": "node scripts/enforce-pnpm.cjs && node dist/export-github-org-snapshot.js",
+		"apply:public-max": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/public-max.repo.json",
+		"apply:public-max:repo": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/public-max.repo.json",
+		"apply:public-max:org": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/public-max.org.json",
+		"apply:public-max:all": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/public-max.json",
+		"apply:private-team-free": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-free.repo.json",
+		"apply:private-team-free:repo": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-free.repo.json",
+		"apply:private-team-free:org": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-free.org.json",
+		"apply:private-team-free:all": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-free.json",
+		"apply:private-team-paid": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-paid.repo.json",
+		"apply:private-team-paid:repo": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-paid.repo.json",
+		"apply:private-team-paid:org": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-paid.org.json",
+		"apply:private-team-paid:all": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-paid.json",
+		"apply:private-team-requires-ghec": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-requires-ghec.repo.json",
+		"apply:private-team-requires-ghec:repo": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-requires-ghec.repo.json",
+		"apply:private-team-requires-ghec:org": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-requires-ghec.org.json",
+		"apply:private-team-requires-ghec:all": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-requires-ghec.json",
+		"apply:low-cost": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-free.repo.json",
+		"apply:low-cost:repo": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-free.repo.json",
+		"apply:low-cost:org": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-free.org.json",
+		"apply:low-cost:all": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-free.json",
+		"apply": "node scripts/enforce-pnpm.cjs && node dist/apply-github-baseline.js --config config/private-team-free.repo.json"
 	},
 	"dependencies": {
 		"octokit": "^5.0.5"
 	},
 	"devDependencies": {
 		"@types/node": "^24.12.0",
-		"typescript": "^5.9.3"
+		"typescript": "^6.0.2"
 	}
 }
