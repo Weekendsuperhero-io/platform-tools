@@ -153,6 +153,32 @@ jobs:
           token: ${{ steps.app-token.outputs.token || github.token }}
           fetch-depth: 0
 
+      - name: Ensure changelog exists
+        shell: bash
+        env:
+          CHANGELOG_PATH: ${{ inputs.changelog-path }}
+          UNRELEASED: ${{ inputs.unreleased-heading }}
+        run: |
+          set -euo pipefail
+
+          if [ -f "$CHANGELOG_PATH" ]; then
+            exit 0
+          fi
+
+          echo "Changelog file not found. Creating $CHANGELOG_PATH"
+          mkdir -p "$(dirname "$CHANGELOG_PATH")"
+
+          cat > "$CHANGELOG_PATH" <<EOF
+          # Changelog
+
+          All notable changes to this project will be documented in this file.
+
+          The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+          and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+          ${UNRELEASED}
+          EOF
+
       - name: Find changes since last changelog update
         id: changes
         shell: bash
@@ -163,17 +189,23 @@ jobs:
         run: |
           set -euo pipefail
 
-          LAST_CHANGELOG_SHA=$(git log -1 --format='%H' -- "$CHANGELOG_PATH" 2>/dev/null || echo "")
+          LAST_CHANGELOG_SHA=$(git log -1 --format='%H' -- "$CHANGELOG_PATH" 2>/dev/null || true)
 
           if [ -z "$LAST_CHANGELOG_SHA" ]; then
             echo "No previous CHANGELOG commit found — using last $FALLBACK_COUNT commits"
-            LAST_CHANGELOG_SHA=$(git log --skip="$FALLBACK_COUNT" -1 --format='%H')
+            LAST_CHANGELOG_SHA=$(git log --skip="$FALLBACK_COUNT" -1 --format='%H' || true)
+          fi
+
+          RANGE_SPEC="$LAST_CHANGELOG_SHA..HEAD"
+          if [ -z "$LAST_CHANGELOG_SHA" ]; then
+            echo "Repository has fewer than fallback commits — scanning up to $MAX_COMMITS commits from HEAD"
+            RANGE_SPEC="HEAD"
           fi
 
           echo "Last changelog commit: $LAST_CHANGELOG_SHA"
           echo "last_sha=$LAST_CHANGELOG_SHA" >> "$GITHUB_OUTPUT"
 
-          git log -n "$MAX_COMMITS" "$LAST_CHANGELOG_SHA"..HEAD \
+          git log -n "$MAX_COMMITS" "$RANGE_SPEC" \
             --no-merges \
             --date=iso-strict \
             --format='=== COMMIT ===%nHash: %H%nAuthor: %an <%ae>%nDate: %ad%nSubject: %s%nBody:%n%b%n' \
@@ -258,6 +290,15 @@ jobs:
           if [ -z "$NEW_ENTRIES" ]; then
             echo "::error::No output from Jules"
             exit 1
+          fi
+
+          if ! grep -Fxq "$UNRELEASED" "$CHANGELOG_PATH"; then
+            echo "Unreleased heading missing. Prepending '$UNRELEASED'."
+            {
+              printf '%s\n\n' "$UNRELEASED"
+              cat "$CHANGELOG_PATH"
+            } > /tmp/changelog_with_heading.md
+            mv /tmp/changelog_with_heading.md "$CHANGELOG_PATH"
           fi
 
           awk -v entries="$NEW_ENTRIES" -v heading="$UNRELEASED" '
