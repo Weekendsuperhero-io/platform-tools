@@ -8,6 +8,16 @@ on:
         type: string
         required: false
         default: stable
+      manifest-path:
+        description: Path to Cargo.toml used to resolve default binary name
+        type: string
+        required: false
+        default: Cargo.toml
+      binary-name:
+        description: Optional explicit binary base name (without .exe)
+        type: string
+        required: false
+        default: ""
       rust-cache-provider:
         description: Rust cache backend for Swatinem/rust-cache (github or warpbuild)
         type: string
@@ -46,8 +56,9 @@ on:
       binary-matrix-json:
         description: >
           JSON matrix for release builds.
-          Required keys per item: name, os, target, binary, archive.
-          Optional key: cargo_args.
+          Required keys per item: os, target.
+          Recommended key: name.
+          Optional keys: binary, archive, cargo_args.
         type: string
         required: false
         default: "[]"
@@ -67,7 +78,7 @@ on:
         required: false
         default: false
       macos-universal-binary:
-        description: Binary filename to combine with lipo (for example agentmail)
+        description: Optional binary filename to combine with lipo (defaults to resolved binary name)
         type: string
         required: false
         default: ""
@@ -77,7 +88,7 @@ on:
         required: false
         default: macos-aarch64
       macos-universal-arm64-archive:
-        description: Archive filename inside arm64 artifact (for example app-macos-aarch64.tar.gz)
+        description: Optional archive filename inside arm64 artifact (defaults to <binary>-<arm64 artifact>.tar.gz)
         type: string
         required: false
         default: ""
@@ -87,12 +98,12 @@ on:
         required: false
         default: macos-x86_64
       macos-universal-x86_64-archive:
-        description: Archive filename inside x86_64 artifact (for example app-macos-x86_64.tar.gz)
+        description: Optional archive filename inside x86_64 artifact (defaults to <binary>-<x86 artifact>.tar.gz)
         type: string
         required: false
         default: ""
       macos-universal-output-archive:
-        description: Output archive filename for universal binary
+        description: Optional output archive filename (defaults to <binary>-macos-universal.tar.gz)
         type: string
         required: false
         default: ""
@@ -169,6 +180,66 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  resolve-binary:
+    name: Resolve binary name
+    runs-on: ubuntu-latest
+    outputs:
+      binary-name: ${{ steps.resolve.outputs.binary_name }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve binary name
+        id: resolve
+        shell: bash
+        env:
+          INPUT_BINARY_NAME: ${{ inputs.binary-name }}
+          MANIFEST_PATH: ${{ inputs.manifest-path }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$INPUT_BINARY_NAME" ]; then
+            echo "binary_name=$INPUT_BINARY_NAME" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          import os
+          import sys
+          import tomllib
+
+          manifest_path = os.environ["MANIFEST_PATH"]
+          with open(manifest_path, "rb") as f:
+            data = tomllib.load(f)
+
+          bins = data.get("bin", [])
+          bin_names = [b.get("name") for b in bins if isinstance(b, dict) and b.get("name")]
+
+          if len(bin_names) > 1:
+            print(
+              "::error::Multiple [[bin]] entries found in Cargo.toml. "
+              "Set workflow input 'binary-name' explicitly.",
+              file=sys.stderr,
+            )
+            sys.exit(1)
+
+          if len(bin_names) == 1:
+            resolved = bin_names[0]
+          else:
+            pkg = data.get("package", {})
+            resolved = pkg.get("name")
+            if not resolved:
+              print(
+                "::error::Could not resolve binary name from Cargo.toml. "
+                "Set workflow input 'binary-name' explicitly.",
+                file=sys.stderr,
+              )
+              sys.exit(1)
+
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as out:
+            out.write(f"binary_name={resolved}\n")
+          PY
+
   validate:
     name: Validate Release
     runs-on: ${{ inputs.validate-runs-on }}
@@ -207,9 +278,11 @@ jobs:
         run: ${{ inputs.validate-build-command }}
 
   build-binaries:
-    name: Build (${{ matrix.name }})
+    name: Build (${{ matrix.name || matrix.target }})
     if: inputs.binary-matrix-json != '[]'
-    needs: validate
+    needs:
+      - validate
+      - resolve-binary
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -239,49 +312,130 @@ jobs:
       - name: Build release binary
         run: cargo build --target ${{ matrix.target }} ${{ matrix.cargo_args || inputs.build-matrix-default-cargo-args }}
 
+      - name: Resolve artifact metadata
+        id: artifact
+        shell: bash
+        env:
+          MATRIX_BINARY: ${{ matrix.binary }}
+          MATRIX_ARCHIVE: ${{ matrix.archive }}
+          MATRIX_NAME: ${{ matrix.name }}
+          MATRIX_TARGET: ${{ matrix.target }}
+          BASE_BINARY: ${{ needs.resolve-binary.outputs.binary-name }}
+        run: |
+          set -euo pipefail
+
+          BINARY="$MATRIX_BINARY"
+          if [ -z "$BINARY" ]; then
+            BINARY="$BASE_BINARY"
+            if [ "${{ runner.os }}" = "Windows" ]; then
+              BINARY="${BINARY}.exe"
+            fi
+          fi
+
+          SUFFIX="$MATRIX_NAME"
+          if [ -z "$SUFFIX" ]; then
+            SUFFIX="$MATRIX_TARGET"
+          fi
+
+          ARCHIVE="$MATRIX_ARCHIVE"
+          if [ -z "$ARCHIVE" ]; then
+            if [ "${{ runner.os }}" = "Windows" ]; then
+              ARCHIVE="${BASE_BINARY}-${SUFFIX}.zip"
+            else
+              ARCHIVE="${BASE_BINARY}-${SUFFIX}.tar.gz"
+            fi
+          fi
+
+          ARTIFACT_NAME="$MATRIX_NAME"
+          if [ -z "$ARTIFACT_NAME" ]; then
+            ARTIFACT_NAME="$MATRIX_TARGET"
+          fi
+
+          echo "binary=$BINARY" >> "$GITHUB_OUTPUT"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           cd "target/${{ matrix.target }}/release"
-          tar czf "../../../${{ matrix.archive }}" "${{ matrix.binary }}"
+          tar czf "../../../${{ steps.artifact.outputs.archive }}" "${{ steps.artifact.outputs.binary }}"
 
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.binary }}" -DestinationPath "${{ matrix.archive }}"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/${{ steps.artifact.outputs.binary }}" -DestinationPath "${{ steps.artifact.outputs.archive }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}
-          path: ${{ matrix.archive }}
+          name: ${{ steps.artifact.outputs.artifact_name }}
+          path: ${{ steps.artifact.outputs.archive }}
 
   build-macos-universal:
     name: Build (macos-universal)
     if: inputs.enable-macos-universal
-    needs: build-binaries
+    needs:
+      - build-binaries
+      - resolve-binary
     runs-on: macos-latest
 
     steps:
-      - name: Validate universal inputs
+      - name: Resolve universal artifact metadata
+        id: universal
         shell: bash
+        env:
+          INPUT_BINARY: ${{ inputs.macos-universal-binary }}
+          INPUT_ARM64_ARCHIVE: ${{ inputs.macos-universal-arm64-archive }}
+          INPUT_X86_ARCHIVE: ${{ inputs.macos-universal-x86_64-archive }}
+          INPUT_OUTPUT_ARCHIVE: ${{ inputs.macos-universal-output-archive }}
+          ARM64_ARTIFACT: ${{ inputs.macos-universal-arm64-artifact }}
+          X86_ARTIFACT: ${{ inputs.macos-universal-x86_64-artifact }}
+          RESOLVED_BINARY: ${{ needs.resolve-binary.outputs.binary-name }}
         run: |
           set -euo pipefail
 
-          for value in \
-            "${{ inputs.macos-universal-binary }}" \
-            "${{ inputs.macos-universal-arm64-archive }}" \
-            "${{ inputs.macos-universal-x86_64-archive }}" \
-            "${{ inputs.macos-universal-output-archive }}"
-          do
+          for value in "$ARM64_ARTIFACT" "$X86_ARTIFACT"; do
             if [ -z "$value" ]; then
               echo "::error::Universal build input is missing"
               exit 1
             fi
           done
+
+          BINARY="$INPUT_BINARY"
+          if [ -z "$BINARY" ]; then
+            BINARY="$RESOLVED_BINARY"
+          fi
+
+          if [ -z "$BINARY" ]; then
+            echo "::error::Could not resolve macOS universal binary name"
+            exit 1
+          fi
+
+          ARM64_ARCHIVE="$INPUT_ARM64_ARCHIVE"
+          if [ -z "$ARM64_ARCHIVE" ]; then
+            ARM64_ARCHIVE="${BINARY}-${ARM64_ARTIFACT}.tar.gz"
+          fi
+
+          X86_ARCHIVE="$INPUT_X86_ARCHIVE"
+          if [ -z "$X86_ARCHIVE" ]; then
+            X86_ARCHIVE="${BINARY}-${X86_ARTIFACT}.tar.gz"
+          fi
+
+          OUTPUT_ARCHIVE="$INPUT_OUTPUT_ARCHIVE"
+          if [ -z "$OUTPUT_ARCHIVE" ]; then
+            OUTPUT_ARCHIVE="${BINARY}-macos-universal.tar.gz"
+          fi
+
+          echo "binary=$BINARY" >> "$GITHUB_OUTPUT"
+          echo "arm64_artifact=$ARM64_ARTIFACT" >> "$GITHUB_OUTPUT"
+          echo "arm64_archive=$ARM64_ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "x86_artifact=$X86_ARTIFACT" >> "$GITHUB_OUTPUT"
+          echo "x86_archive=$X86_ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "output_archive=$OUTPUT_ARCHIVE" >> "$GITHUB_OUTPUT"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -296,25 +450,25 @@ jobs:
           mkdir -p work
           cd work
 
-          tar xzf "../artifacts/${{ inputs.macos-universal-arm64-artifact }}/${{ inputs.macos-universal-arm64-archive }}"
-          mv "${{ inputs.macos-universal-binary }}" "${{ inputs.macos-universal-binary }}-arm64"
+          tar xzf "../artifacts/${{ steps.universal.outputs.arm64_artifact }}/${{ steps.universal.outputs.arm64_archive }}"
+          mv "${{ steps.universal.outputs.binary }}" "${{ steps.universal.outputs.binary }}-arm64"
 
-          tar xzf "../artifacts/${{ inputs.macos-universal-x86_64-artifact }}/${{ inputs.macos-universal-x86_64-archive }}"
-          mv "${{ inputs.macos-universal-binary }}" "${{ inputs.macos-universal-binary }}-x86_64"
+          tar xzf "../artifacts/${{ steps.universal.outputs.x86_artifact }}/${{ steps.universal.outputs.x86_archive }}"
+          mv "${{ steps.universal.outputs.binary }}" "${{ steps.universal.outputs.binary }}-x86_64"
 
           lipo -create \
-            -output "${{ inputs.macos-universal-binary }}" \
-            "${{ inputs.macos-universal-binary }}-arm64" \
-            "${{ inputs.macos-universal-binary }}-x86_64"
+            -output "${{ steps.universal.outputs.binary }}" \
+            "${{ steps.universal.outputs.binary }}-arm64" \
+            "${{ steps.universal.outputs.binary }}-x86_64"
 
-          file "${{ inputs.macos-universal-binary }}"
-          tar czf "../${{ inputs.macos-universal-output-archive }}" "${{ inputs.macos-universal-binary }}"
+          file "${{ steps.universal.outputs.binary }}"
+          tar czf "../${{ steps.universal.outputs.output_archive }}" "${{ steps.universal.outputs.binary }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.macos-universal-artifact-name }}
-          path: ${{ inputs.macos-universal-output-archive }}
+          path: ${{ steps.universal.outputs.output_archive }}
 
   create-release:
     name: Create GitHub Release

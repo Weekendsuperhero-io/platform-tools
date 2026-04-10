@@ -133,21 +133,20 @@ jobs:
       validate-runs-on: ubuntu-latest
       rust-cache-provider: github
       validate-linux-packages: "libdbus-1-dev pkg-config"
+      # Optional override if binary cannot be inferred from Cargo.toml
+      # binary-name: agentmail
       binary-matrix-json: >-
         [
-          {"name":"linux-x86_64","os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","binary":"agentmail","archive":"agentmail-linux-x86_64.tar.gz"},
-          {"name":"linux-aarch64","os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","binary":"agentmail","archive":"agentmail-linux-aarch64.tar.gz"},
-          {"name":"macos-x86_64","os":"macos-latest","target":"x86_64-apple-darwin","binary":"agentmail","archive":"agentmail-macos-x86_64.tar.gz"},
-          {"name":"macos-aarch64","os":"macos-latest","target":"aarch64-apple-darwin","binary":"agentmail","archive":"agentmail-macos-aarch64.tar.gz"},
-          {"name":"windows-x86_64","os":"windows-latest","target":"x86_64-pc-windows-msvc","binary":"agentmail.exe","archive":"agentmail-windows-x86_64.zip"}
+          {"name":"linux-x86_64","os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},
+          {"name":"linux-aarch64","os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"},
+          {"name":"macos-x86_64","os":"macos-latest","target":"x86_64-apple-darwin"},
+          {"name":"macos-aarch64","os":"macos-latest","target":"aarch64-apple-darwin"},
+          {"name":"windows-x86_64","os":"windows-latest","target":"x86_64-pc-windows-msvc"}
         ]
       enable-macos-universal: true
-      macos-universal-binary: agentmail
-      macos-universal-arm64-artifact: macos-aarch64
-      macos-universal-arm64-archive: agentmail-macos-aarch64.tar.gz
-      macos-universal-x86_64-artifact: macos-x86_64
-      macos-universal-x86_64-archive: agentmail-macos-x86_64.tar.gz
-      macos-universal-output-archive: agentmail-macos-universal.tar.gz
+      # Optional overrides if your artifact names differ:
+      # macos-universal-arm64-artifact: macos-aarch64
+      # macos-universal-x86_64-artifact: macos-x86_64
       publish-crates-io: true
       cargo-publish-command: cargo publish -p agentmail
     secrets: inherit
@@ -205,13 +204,21 @@ jobs:
 
 | Input                               | Default                     | Description                                                |
 | ----------------------------------- | --------------------------- | ---------------------------------------------------------- |
+| `manifest-path`                     | `Cargo.toml`                | Manifest path used to infer binary name                    |
+| `binary-name`                       | _(auto)_                    | Optional explicit binary base name (without `.exe`)        |
 | `validate-runs-on`                  | `ubuntu-latest`             | Runner for release validation                              |
 | `rust-cache-provider`               | `github`                   | Rust cache backend provider (`github` or `warpbuild`)      |
 | `validate-linux-packages`           | _(empty)_                   | Linux apt packages for validation                          |
-| `binary-matrix-json`                | `[]`                        | Release build matrix (JSON array with name/os/target/etc) |
+| `binary-matrix-json`                | `[]`                        | Release matrix (required per item: `os`, `target`; optional: `name`, `binary`, `archive`, `cargo_args`) |
 | `build-linux-packages`              | _(empty)_                   | Linux apt packages for binary build jobs                   |
 | `build-matrix-default-cargo-args`   | `--release`                 | Fallback cargo args for matrix entries                     |
 | `enable-macos-universal`            | `false`                     | Build universal macOS binary with `lipo`                  |
+| `macos-universal-binary`            | _(auto)_                    | Optional override for universal binary name               |
+| `macos-universal-arm64-artifact`    | `macos-aarch64`             | Artifact name containing arm64 archive                    |
+| `macos-universal-arm64-archive`     | _(auto)_                    | Optional arm64 archive override (`<binary>-<artifact>.tar.gz`) |
+| `macos-universal-x86_64-artifact`   | `macos-x86_64`              | Artifact name containing x86_64 archive                   |
+| `macos-universal-x86_64-archive`    | _(auto)_                    | Optional x86_64 archive override (`<binary>-<artifact>.tar.gz`) |
+| `macos-universal-output-archive`    | _(auto)_                    | Optional universal archive override (`<binary>-macos-universal.tar.gz`) |
 | `create-github-release`             | `true`                      | Publish GitHub release from uploaded artifacts             |
 | `release-assets-glob`               | _(empty)_                   | Optional newline-separated filename globs                  |
 | `publish-crates-io`                 | `false`                     | Publish to crates.io                                       |
