@@ -53,6 +53,17 @@ on:
         type: number
         required: false
         default: 30
+      commit-format:
+        description: |
+          How much of each commit message to include in the prompt:
+          - "oneline" (default): just `<short-hash> <subject>`, one line per commit.
+          - "full": short-hash + the entire commit message body, separated by
+            `=== END OF COMMIT ===` markers. Useful when commit bodies carry
+            substantive context (rationale, alternatives, decisions) that the
+            LLM should see when composing the PR description.
+        type: string
+        required: false
+        default: "oneline"
       custom-prompt:
         description: "Override the default prompt (leave empty to use built-in)"
         type: string
@@ -139,6 +150,7 @@ jobs:
           PATTERNS: ${{ inputs.diff-file-patterns }}
           EXCLUDES: ${{ inputs.diff-exclude-patterns }}
           MAX_COMMITS: ${{ inputs.max-commit-messages }}
+          COMMIT_FORMAT: ${{ inputs.commit-format }}
         run: |
           set -euo pipefail
 
@@ -151,8 +163,26 @@ jobs:
             BASE_REF="origin/main"
           fi
 
-          # Commit messages
-          git log --oneline "${BASE_REF}"..HEAD | head -n "$MAX_COMMITS" > /tmp/commits.txt
+          # Commit messages — opt in to "full" for bodies (multi-paragraph
+          # commits with rationale, decisions) or stay on "oneline" for the
+          # short subject-only view.
+          case "$COMMIT_FORMAT" in
+            full)
+              # %h = short hash, %B = full message (subject + body), separator
+              # makes commits parseable by the consuming LLM. Use git's -n
+              # directly (not | head) so we don't truncate mid-commit.
+              git log -n "$MAX_COMMITS" \
+                --format="commit %h%n%B%n=== END OF COMMIT ===%n" \
+                "${BASE_REF}"..HEAD > /tmp/commits.txt
+              ;;
+            oneline|"")
+              git log --oneline "${BASE_REF}"..HEAD | head -n "$MAX_COMMITS" > /tmp/commits.txt
+              ;;
+            *)
+              echo "::error::Unknown commit-format '${COMMIT_FORMAT}'. Use 'oneline' or 'full'."
+              exit 1
+              ;;
+          esac
 
           # Diff stats
           git diff --stat "${BASE_REF}"...HEAD | tail -1 > /tmp/diff_stat.txt
