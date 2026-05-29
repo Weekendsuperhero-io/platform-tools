@@ -138,7 +138,6 @@ jobs:
           BASE_BRANCH: ${{ inputs.base-branch }}
           PATTERNS: ${{ inputs.diff-file-patterns }}
           EXCLUDES: ${{ inputs.diff-exclude-patterns }}
-          MAX_DIFF: ${{ inputs.max-diff-lines }}
           MAX_COMMITS: ${{ inputs.max-commit-messages }}
         run: |
           set -euo pipefail
@@ -170,8 +169,7 @@ jobs:
           git diff "${BASE_REF}"...HEAD \
             -- \
             "${PATTERNS_ARRAY[@]}" \
-            "${EXCLUDES_ARRAY[@]}" \
-            | head -n "$MAX_DIFF" > /tmp/diff.txt
+            "${EXCLUDES_ARRAY[@]}" > /tmp/diff.txt
 
       - name: Build prompt
         if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
