@@ -256,7 +256,7 @@ jobs:
         with:
           title: "PR Title and Description"
           jules_api_key: ${{ secrets.JULES_API_KEY }}
-          source: sources/github/${{ github.repository }}
+          source: sources/github-${{ github.repository_owner }}-${{ github.event.repository.name }}
           starting_branch: ${{ github.head_ref || github.ref_name }}
 
       - name: Update PR

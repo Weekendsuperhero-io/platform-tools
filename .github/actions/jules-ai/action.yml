@@ -68,7 +68,7 @@ runs:
 
         # The Jules API requires sourceContext on session creation. Derive it from
         # the GitHub context when the caller does not override it.
-        SOURCE="${SOURCE:-sources/github/${GITHUB_REPOSITORY}}"
+        SOURCE="${SOURCE:-sources/github-${GITHUB_REPOSITORY/\//-}}"
         STARTING_BRANCH="${STARTING_BRANCH:-${GITHUB_REF_NAME}}"
 
         # Build JSON payload from file to avoid argument list too long
@@ -104,26 +104,40 @@ runs:
 
         # Poll for an agent activity
         WAITED=0
-        while [ $WAITED -lt $MAX_WAIT ]; do
+        while [ "$WAITED" -lt "$MAX_WAIT" ]; do
+          # A transient curl failure or empty/non-JSON body must not kill the
+          # whole step (set -e / pipefail) — treat it as "nothing yet" and retry.
           ACTIVITIES=$(curl -s -H "x-goog-api-key: $JULES_API_KEY" \
-            "$API/$SESSION_ID/activities")
+            "$API/$SESSION_ID/activities?pageSize=30") || ACTIVITIES=""
 
-          AGENT_MSG=$(echo "$ACTIVITIES" | jq -r '
+          # Fail fast with the real reason if Jules reports the session failed.
+          FAILURE=$(printf '%s' "$ACTIVITIES" | jq -r '
+            [(.activities // [])[] | select(.sessionFailed != null) | .sessionFailed]
+            | last // empty
+          ' 2>/dev/null || true)
+          if [ -n "$FAILURE" ]; then
+            echo "::error::Jules session failed: $FAILURE"
+            exit 1
+          fi
+
+          # Take the most recent agent message (the answer arrives in a later
+          # activity; earlier ones may be preliminary chatter).
+          AGENT_MSG=$(printf '%s' "$ACTIVITIES" | jq -r '
             [(.activities // [])[]
               | select(.originator == "agent")
               | select(.agentMessaged != null)
               | .agentMessaged.agentMessage
-            ] | first // empty
-          ')
+            ] | last // empty
+          ' 2>/dev/null || true)
 
           if [ -n "$AGENT_MSG" ]; then
             echo "Agent responded" >&2
-            echo "$AGENT_MSG" > /tmp/jules_response.txt
+            printf '%s' "$AGENT_MSG" > /tmp/jules_response.txt
             break
           fi
 
           echo "  Waiting for agent response... (${WAITED}s)" >&2
-          sleep $INTERVAL
+          sleep "$INTERVAL"
           WAITED=$((WAITED + INTERVAL))
         done
 
