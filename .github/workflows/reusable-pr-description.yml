@@ -196,10 +196,44 @@ jobs:
           # shellcheck disable=SC2206
           EXCLUDES_ARRAY=($EXCLUDES_CLEAN)
 
-          git diff "${BASE_REF}"...HEAD \
-            -- \
-            "${PATTERNS_ARRAY[@]}" \
-            "${EXCLUDES_ARRAY[@]}" > /tmp/diff.txt
+          # Generated/lock/minified files bloat the payload without adding review
+          # signal. Exclude them by default (in addition to caller excludes). The
+          # full stat above still reflects them, so nothing is hidden.
+          # Plain pathspec wildcards match '/', so '*.lock' matches at any depth
+          # (root included). '*Cargo.lock'/'*yarn.lock' are covered by '*.lock'.
+          DEFAULT_EXCLUDES=(
+            ':(exclude)*.lock'
+            ':(exclude)*package-lock.json'
+            ':(exclude)*pnpm-lock.yaml'
+            ':(exclude)*.min.js'
+            ':(exclude)*.min.css'
+            ':(exclude)*.map'
+            ':(exclude)*.snap'
+            ':(exclude)*__snapshots__*'
+          )
+
+          # Emit a per-file diff, but collapse any single file whose diff is huge
+          # to just its stat line. This keeps full context for every normal file
+          # while preventing one large/generated file from crowding out the rest
+          # (the old global truncation could drop real changes entirely).
+          MAX_FILE_DIFF_BYTES=60000
+          : > /tmp/diff.txt
+          git -c core.quotePath=false diff --name-only "${BASE_REF}"...HEAD -- \
+            "${PATTERNS_ARRAY[@]}" "${EXCLUDES_ARRAY[@]}" "${DEFAULT_EXCLUDES[@]}" \
+            > /tmp/changed_files.txt
+
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            git -c core.quotePath=false diff -U3 "${BASE_REF}"...HEAD -- "$f" > /tmp/file_diff.txt
+            fbytes=$(wc -c < /tmp/file_diff.txt)
+            if [ "$fbytes" -gt "$MAX_FILE_DIFF_BYTES" ]; then
+              stat_line=$(git diff --stat "${BASE_REF}"...HEAD -- "$f" | sed -n '1p')
+              printf '%s\n... [diff for this file collapsed: %s bytes; see stat] ...\n\n' \
+                "$stat_line" "$fbytes" >> /tmp/diff.txt
+            else
+              cat /tmp/file_diff.txt >> /tmp/diff.txt
+            fi
+          done < /tmp/changed_files.txt
 
       - name: Build prompt
         if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
@@ -239,9 +273,19 @@ jobs:
           echo "=== DIFF STATS ===" >> /tmp/prompt.txt
           cat /tmp/diff_stat.txt >> /tmp/prompt.txt
 
+          # Cap the diff: Jules rejects oversized prompts with HTTP 400 (measured
+          # ceiling ~1.4MB payload). Keep the diff well under that, leaving room
+          # for commits/stats/boilerplate, so the total stays in the reliable zone.
+          MAX_DIFF_BYTES=800000
           echo "" >> /tmp/prompt.txt
-          echo "=== CODE DIFF (truncated) ===" >> /tmp/prompt.txt
-          cat /tmp/diff.txt >> /tmp/prompt.txt
+          if [ "$(wc -c < /tmp/diff.txt)" -gt "$MAX_DIFF_BYTES" ]; then
+            echo "=== CODE DIFF (truncated to ${MAX_DIFF_BYTES} bytes) ===" >> /tmp/prompt.txt
+            head -c "$MAX_DIFF_BYTES" /tmp/diff.txt >> /tmp/prompt.txt
+            printf '\n... [diff truncated; original was %s bytes] ...\n' "$(wc -c < /tmp/diff.txt)" >> /tmp/prompt.txt
+          else
+            echo "=== CODE DIFF ===" >> /tmp/prompt.txt
+            cat /tmp/diff.txt >> /tmp/prompt.txt
+          fi
 
           # Store full prompt as output for the composite action
           PROMPT_CONTENT=$(cat /tmp/prompt.txt)

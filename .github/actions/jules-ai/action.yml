@@ -63,6 +63,19 @@ runs:
           exit 1
         fi
 
+        # Defensive cap: an oversized prompt is rejected with HTTP 400. Measured
+        # limit is ~1.41MB of JSON payload; everything <=~1.0MB payload is
+        # reliably accepted. Cap the prompt at 950KB to stay well inside that
+        # (JSON escaping inflates the payload ~3%) with margin for the title.
+        MAX_PROMPT_BYTES=950000
+        PROMPT_BYTES=$(wc -c < "$PROMPT_FILE")
+        if [ "$PROMPT_BYTES" -gt "$MAX_PROMPT_BYTES" ]; then
+          echo "::warning::Prompt is ${PROMPT_BYTES} bytes; truncating to ${MAX_PROMPT_BYTES} to avoid a 400 from Jules." >&2
+          head -c "$MAX_PROMPT_BYTES" "$PROMPT_FILE" > /tmp/jules_prompt_capped.txt
+          printf '\n... [prompt truncated from %s bytes] ...\n' "$PROMPT_BYTES" >> /tmp/jules_prompt_capped.txt
+          PROMPT_FILE=/tmp/jules_prompt_capped.txt
+        fi
+
         # Repoless session: only the prompt is required (no sourceContext). Jules
         # spins up an ephemeral environment from the prompt context alone.
         jq -Rs --arg title "$SESSION_TITLE" '{prompt: ., title: $title}' "$PROMPT_FILE" > /tmp/jules_payload.json
