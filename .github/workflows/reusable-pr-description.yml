@@ -87,15 +87,17 @@ jobs:
 
     steps:
       - name: Check trigger phrase
-        if: github.event_name == 'pull_request'
+        id: check
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          TRIGGER_PHRASE: ${{ inputs.trigger-phrase }}
         run: |
-          if ! echo '${{ github.event.pull_request.body }}' | grep -qF "${{ inputs.trigger-phrase }}"; then
-            echo "Trigger phrase '${{ inputs.trigger-phrase }}' not found — skipping"
+          if ! printf '%s' "$PR_BODY" | grep -qF "$TRIGGER_PHRASE"; then
+            echo "Trigger phrase '$TRIGGER_PHRASE' not found — skipping"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-        id: check
 
       - name: Set skip default (non-PR events)
         if: github.event_name != 'pull_request'
