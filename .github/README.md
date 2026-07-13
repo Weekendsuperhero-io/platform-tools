@@ -22,7 +22,7 @@ name: Update PR Description
 
 on:
   pull_request:
-    types: [opened, edited]
+    types: [opened, edited, reopened, synchronize]
 
 jobs:
   update-pr:
@@ -31,16 +31,20 @@ jobs:
     uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-pr-description.yml@main
     with:
       trigger-phrase: "@agent pr-title" # optional — only runs if this phrase is in the PR body
+      # Private repos can opt into Warp; the public-repo default is ubuntu-latest.
+      # runner: warp-ubuntu-latest-x64-4x
     secrets: inherit
 ```
 
 **How it works:**
 
-- When a PR is opened/edited with `@agent pr-title` in the body, the workflow:
+- On a configured PR event with `@agent pr-title` in the body, the workflow:
   1. Diffs the PR against its base branch
   2. Sends the diff + commit messages to Jules AI
-  3. Updates the PR with a structured title and description
+  3. Inserts or replaces the description inside Agent managed markers
 - If the PR body doesn't contain the trigger phrase, the workflow skips
+- Human-authored content outside the markers is preserved across updates
+- Bot-authored `edited` events are ignored to prevent a regeneration loop
 
 ### 2. Changelog Generator
 
@@ -62,6 +66,8 @@ jobs:
     with:
       changelog-path: CHANGELOG.md
       pr-branch-prefix: "chore/changelog-"
+      # Private repos can opt into Warp; the public-repo default is ubuntu-latest.
+      # runner: warp-ubuntu-latest-x64-4x
     secrets: inherit
 ```
 
@@ -154,10 +160,20 @@ jobs:
 
 ## Configuration Options
 
+### Runner Policy
+
+The PR-description and changelog workflows default to `ubuntu-latest` so public
+repositories stay on GitHub-hosted runners. Private repositories that have
+WarpBuild access should explicitly pass `runner: warp-ubuntu-latest-x64-4x` (or
+another approved Warp label) from their thin caller workflow. Runner selection
+is explicit rather than inferred from repository visibility, so forks and repos
+without Warp access retain a safe default.
+
 ### PR Description Workflow
 
 | Input                   | Default                                            | Description                                        |
 | ----------------------- | -------------------------------------------------- | -------------------------------------------------- |
+| `runner`                | `ubuntu-latest`                                    | Runner label; private repos can pass a Warp runner |
 | `trigger-phrase`        | `@agent pr-title`                                  | Phrase required in PR body to trigger the workflow |
 | `base-branch`           | _(auto-detect)_                                    | Branch to diff against                             |
 | `diff-file-patterns`    | `*.rs *.ts *.tsx *.toml *.sql *.yml *.sh *.css`    | File patterns to include in diff                   |
@@ -170,6 +186,7 @@ jobs:
 
 | Input                   | Default                     | Description                                      |
 | ----------------------- | --------------------------- | ------------------------------------------------ |
+| `runner`                | `ubuntu-latest`             | Runner label; private repos can pass a Warp runner |
 | `changelog-path`        | `CHANGELOG.md`              | Path to your changelog file                      |
 | `pr-branch-prefix`      | `chore/update-changelog`    | Prefix for the generated PR branch               |
 | `max-commit-messages`   | `50`                        | Max full commit messages (subject + body) to include |
@@ -237,7 +254,7 @@ Jules workflows require:
 | Secret          | Required | Description                                             |
 | --------------- | -------- | ------------------------------------------------------- |
 | `JULES_API_KEY` | Yes      | API key for Jules AI                                    |
-| `JULES_PR_CLIENT_ID` | Optional | GitHub App ID / client ID for Jules PR automation |
+| `JULES_PR_CLIENT_ID` | Optional | GitHub App client ID for Jules PR automation     |
 | `JULES_PR_PRIVATE_KEY` | Optional | GitHub App private key PEM (must be set with `JULES_PR_CLIENT_ID`) |
 
 Add `JULES_API_KEY` to your repo's **Settings → Secrets and variables → Actions**.
@@ -247,7 +264,7 @@ Rust release workflow requires:
 | Secret                  | Required | Description                                            |
 | ----------------------- | -------- | ------------------------------------------------------ |
 | `CARGO_REGISTRY_TOKEN`  | Only when `publish-crates-io=true` | crates.io API token for `cargo publish` |
-| `JULES_PR_CLIENT_ID`    | Optional | GitHub App ID/client ID used for GitHub release writes |
+| `JULES_PR_CLIENT_ID`    | Optional | GitHub App client ID used for GitHub release writes |
 | `JULES_PR_PRIVATE_KEY`  | Optional | GitHub App private key PEM paired with `JULES_PR_CLIENT_ID` |
 
 Caller workflows can either pass named secrets explicitly (`secrets: { ... }`) or use `secrets: inherit`.
@@ -255,6 +272,9 @@ Caller workflows can either pass named secrets explicitly (`secrets: { ... }`) o
 `GITHUB_TOKEN` is automatically available to workflows via `github.token`; no explicit secret declaration is required in the reusable workflow.
 For GitHub App auth, workflows use `JULES_PR_CLIENT_ID` + `JULES_PR_PRIVATE_KEY`.
 Client secret alone is not sufficient; you need the app private key.
+`JULES_PR_CLIENT_ID` must contain the App's client ID, not its numeric App ID.
+The workflows pass it to `actions/create-github-app-token@v3` using the
+`client-id` input.
 GitHub App permissions for PR description/changelog automation: `Pull requests: Read and write`; add `Contents: Read and write` when creating commit branches/PRs (for changelog), and at least `Contents: Read` for checkout operations with app token.
 When GitHub App auth is used in changelog workflow, commits are authored/committed as `<app-slug>[bot] <id+app-slug[bot]@users.noreply.github.com>`.
 Permissions are separate from secrets: set explicit `permissions` in both caller and reusable workflows for least privilege.
@@ -277,6 +297,7 @@ flowchart TD
     R3[".github/workflows/reusable-rust-ci.yml"]
     R4[".github/workflows/reusable-rust-release.yml"]
     A1[".github/actions/jules-ai/action.yml (composite)"]
+    A2[".github/actions/merge-pr-description/action.yml (composite)"]
   end
 
   C1 -- workflow_call --> R1
@@ -285,6 +306,7 @@ flowchart TD
   C4 -- workflow_call --> R4
 
   R1 --> A1
+  R1 --> A2
   R2 --> A1
 ```
 

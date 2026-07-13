@@ -25,8 +25,8 @@
 
 ## 5) GitHub App Auth Requirements
 - Client secret alone is not enough.
-- Required for app-token auth:
-  - App ID / client ID
+- Required for app-token auth with `actions/create-github-app-token@v3`:
+  - GitHub App client ID (not the numeric App ID)
   - App private key (PEM)
 - For this setup, workflows use:
   - `JULES_PR_CLIENT_ID`
@@ -46,3 +46,15 @@
 ## 8) Versioning/Consumption
 - Callers pinned to older SHAs keep old behavior/bugs.
 - After fixes land, callers should update reference (`@main` or a new pinned SHA/tag).
+
+## 9) Public vs. Private Runner Defaults
+- Reusable workflows must keep `ubuntu-latest` as the public-safe default.
+- Private callers opt into Warp explicitly through the workflow's `runner` input.
+- Do not infer Warp availability from repository visibility; a private repo may not have access to the runner group.
+
+## 10) Generated PR Body Ownership
+- AI-generated content belongs inside explicit Agent start/end markers.
+- Content outside those markers is human-owned and must survive every regeneration.
+- Refresh the current PR body after the AI call so edits made during a long generation run are not lost.
+- Fail on missing, duplicate, or out-of-order markers instead of guessing which content can be replaced.
+- Ignore bot-authored `edited` events so preserving the trigger phrase cannot create a workflow loop.

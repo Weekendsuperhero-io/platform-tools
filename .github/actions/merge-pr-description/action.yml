@@ -1,0 +1,37 @@
+name: Merge PR Description
+description: Preserve human-authored PR content while updating Agent's managed section
+
+inputs:
+  current-title:
+    description: Current pull request title
+    required: true
+  current-body:
+    description: Current pull request body
+    required: false
+    default: ""
+  generated-output:
+    description: Jules response, preferably a JSON object with title and body fields
+    required: true
+
+outputs:
+  title:
+    description: Pull request title after parsing the generated response
+    value: ${{ steps.merge.outputs.title }}
+  body:
+    description: Pull request body with the managed section inserted or replaced
+    value: ${{ steps.merge.outputs.body }}
+  changed:
+    description: Whether the title or body differs from the current pull request
+    value: ${{ steps.merge.outputs.changed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Merge managed PR description
+      id: merge
+      shell: bash
+      env:
+        CURRENT_TITLE: ${{ inputs.current-title }}
+        CURRENT_BODY: ${{ inputs.current-body }}
+        GENERATED_OUTPUT: ${{ inputs.generated-output }}
+      run: node "${{ github.action_path }}/merge-pr-description.mjs"

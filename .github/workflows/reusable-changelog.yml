@@ -17,6 +17,7 @@
 #     with:
 #       changelog-path: CHANGELOG.md          # optional
 #       pr-branch-prefix: "chore/changelog-"  # optional
+#       runner: ubuntu-latest                 # optional; private repos can opt into Warp
 #     secrets: inherit
 # ```
 
@@ -25,6 +26,11 @@ name: Reusable Changelog
 on:
   workflow_call:
     inputs:
+      runner:
+        description: "Runner label for the changelog job"
+        type: string
+        required: false
+        default: "ubuntu-latest"
       changelog-path:
         description: "Path to the CHANGELOG file"
         type: string
@@ -94,7 +100,7 @@ on:
 jobs:
   changelog:
     name: Generate Changelog PR
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
 
     permissions:
       contents: write
@@ -104,18 +110,18 @@ jobs:
         id: app-auth-config
         shell: bash
         env:
-          JULES_APP_ID: ${{ secrets.JULES_PR_CLIENT_ID }}
+          JULES_APP_CLIENT_ID: ${{ secrets.JULES_PR_CLIENT_ID }}
           JULES_APP_KEY: ${{ secrets.JULES_PR_PRIVATE_KEY }}
         run: |
           set -euo pipefail
 
-          if { [ -n "${JULES_APP_ID}" ] && [ -z "${JULES_APP_KEY}" ]; } || { [ -z "${JULES_APP_ID}" ] && [ -n "${JULES_APP_KEY}" ]; }; then
+          if { [ -n "${JULES_APP_CLIENT_ID}" ] && [ -z "${JULES_APP_KEY}" ]; } || { [ -z "${JULES_APP_CLIENT_ID}" ] && [ -n "${JULES_APP_KEY}" ]; }; then
             echo "::error::Set both JULES_PR_CLIENT_ID and JULES_PR_PRIVATE_KEY, or neither."
             exit 1
           fi
 
           ENABLED=false
-          if [ -n "${JULES_APP_ID}" ] && [ -n "${JULES_APP_KEY}" ]; then
+          if [ -n "${JULES_APP_CLIENT_ID}" ] && [ -n "${JULES_APP_KEY}" ]; then
             ENABLED=true
           fi
           echo "enabled=${ENABLED}" >> "$GITHUB_OUTPUT"
@@ -123,9 +129,9 @@ jobs:
       - name: Generate GitHub App token
         if: steps.app-auth-config.outputs.enabled == 'true'
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.JULES_PR_CLIENT_ID }}
+          client-id: ${{ secrets.JULES_PR_CLIENT_ID }}
           private-key: ${{ secrets.JULES_PR_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 

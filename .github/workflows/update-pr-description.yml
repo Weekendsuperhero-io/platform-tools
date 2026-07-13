@@ -5,7 +5,7 @@ name: Update PR Description with Jules
 
 on:
   pull_request:
-    types: [opened, edited]
+    types: [opened, edited, reopened, synchronize]
 
 jobs:
   update-pr:

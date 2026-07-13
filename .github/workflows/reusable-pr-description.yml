@@ -6,7 +6,7 @@
 # name: Update PR Description
 # on:
 #   pull_request:
-#     types: [opened, edited]
+#     types: [opened, edited, reopened, synchronize]
 #
 # jobs:
 #   update-pr:
@@ -15,6 +15,7 @@
 #     uses: <owner>/<repo>/.github/workflows/reusable-pr-description.yml@main
 #     with:
 #       trigger-phrase: "@agent pr-title"   # optional
+#       runner: ubuntu-latest                # optional; private repos can opt into Warp
 #     secrets: inherit
 # ```
 
@@ -23,6 +24,11 @@ name: Reusable PR Description
 on:
   workflow_call:
     inputs:
+      runner:
+        description: "Runner label for the PR-description job"
+        type: string
+        required: false
+        default: "ubuntu-latest"
       trigger-phrase:
         description: "The phrase that must appear in the PR body to trigger this workflow"
         type: string
@@ -80,18 +86,37 @@ on:
 jobs:
   update-pr:
     name: Update PR Title & Description
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
 
     permissions:
       contents: read
 
     steps:
-      - name: Check trigger phrase
+      - name: Check trigger phrase and event source
         id: check
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          SENDER_TYPE: ${{ github.event.sender.type }}
           PR_BODY: ${{ github.event.pull_request.body }}
           TRIGGER_PHRASE: ${{ inputs.trigger-phrase }}
         run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Updating the body emits a second `edited` event. Ignore edits made
+          # by bot identities so the preserved trigger phrase cannot create a
+          # regeneration loop.
+          if [ "$EVENT_ACTION" = "edited" ] && [ "$SENDER_TYPE" = "Bot" ]; then
+            echo "Bot-authored PR edit detected — skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           if ! printf '%s' "$PR_BODY" | grep -qF "$TRIGGER_PHRASE"; then
             echo "Trigger phrase '$TRIGGER_PHRASE' not found — skipping"
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -99,28 +124,22 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set skip default (non-PR events)
-        if: github.event_name != 'pull_request'
-        run: |
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-        id: check-default
-
       - name: Validate GitHub App secret configuration
         id: app-auth-config
         shell: bash
         env:
-          JULES_APP_ID: ${{ secrets.JULES_PR_CLIENT_ID }}
+          JULES_APP_CLIENT_ID: ${{ secrets.JULES_PR_CLIENT_ID }}
           JULES_APP_KEY: ${{ secrets.JULES_PR_PRIVATE_KEY }}
         run: |
           set -euo pipefail
 
-          if { [ -n "${JULES_APP_ID}" ] && [ -z "${JULES_APP_KEY}" ]; } || { [ -z "${JULES_APP_ID}" ] && [ -n "${JULES_APP_KEY}" ]; }; then
+          if { [ -n "${JULES_APP_CLIENT_ID}" ] && [ -z "${JULES_APP_KEY}" ]; } || { [ -z "${JULES_APP_CLIENT_ID}" ] && [ -n "${JULES_APP_KEY}" ]; }; then
             echo "::error::Set both JULES_PR_CLIENT_ID and JULES_PR_PRIVATE_KEY, or neither."
             exit 1
           fi
 
           ENABLED=false
-          if [ -n "${JULES_APP_ID}" ] && [ -n "${JULES_APP_KEY}" ]; then
+          if [ -n "${JULES_APP_CLIENT_ID}" ] && [ -n "${JULES_APP_KEY}" ]; then
             ENABLED=true
           fi
           echo "enabled=${ENABLED}" >> "$GITHUB_OUTPUT"
@@ -128,14 +147,14 @@ jobs:
       - name: Generate GitHub App token
         if: steps.app-auth-config.outputs.enabled == 'true'
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.JULES_PR_CLIENT_ID }}
+          client-id: ${{ secrets.JULES_PR_CLIENT_ID }}
           private-key: ${{ secrets.JULES_PR_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
       - name: Checkout PR head
-        if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
+        if: steps.check.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
@@ -143,7 +162,7 @@ jobs:
           fetch-depth: 0
 
       - name: Gather diff and metadata
-        if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
+        if: steps.check.outputs.skip != 'true'
         id: pr-info
         shell: bash
         env:
@@ -238,7 +257,7 @@ jobs:
           done < /tmp/changed_files.txt
 
       - name: Build prompt
-        if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
+        if: steps.check.outputs.skip != 'true'
         shell: bash
         env:
           CURRENT_TITLE: ${{ github.event_name == 'pull_request' && github.event.pull_request.title || '' }}
@@ -296,39 +315,54 @@ jobs:
           echo "PROMPT_EOF" >> "$GITHUB_OUTPUT"
 
       - name: Generate PR title and description with Jules
-        if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
+        if: steps.check.outputs.skip != 'true'
         id: jules
         uses: weekendsuperhero-io/platform-tools/.github/actions/jules-ai@main
         with:
           title: "PR Title and Description"
           jules_api_key: ${{ secrets.JULES_API_KEY }}
 
-      - name: Update PR
-        if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
+      - name: Read current PR state
+        if: steps.check.outputs.skip != 'true'
+        id: current-pr
         shell: bash
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          CURRENT_TITLE: ${{ github.event.pull_request.title }}
-          JULES_OUTPUT: ${{ steps.jules.outputs.response }}
         run: |
-          # Try parsing as JSON first
-          OUTPUT=$(echo "$JULES_OUTPUT" | sed 's/^```json//;s/^```//' | tr -d '\r')
+          set -euo pipefail
 
-          TITLE=$(echo "$OUTPUT" | jq -r '.title // empty' 2>/dev/null)
-          BODY=$(echo "$OUTPUT" | jq -r '.body // empty' 2>/dev/null)
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+            > /tmp/current-pr.json
+          PR_STATE_COMPACT=$(jq -c \
+            '{title: .title, body: (.body // "")}' \
+            /tmp/current-pr.json)
+          echo "pr=$PR_STATE_COMPACT" >> "$GITHUB_OUTPUT"
 
-          if [ -z "$TITLE" ] || [ -z "$BODY" ]; then
-            echo "Jules output is not JSON — using raw output as description"
-            TITLE="${CURRENT_TITLE}"
-            BODY="$JULES_OUTPUT"
-          fi
+      - name: Merge managed PR description
+        if: steps.check.outputs.skip != 'true'
+        id: merged-pr
+        uses: weekendsuperhero-io/platform-tools/.github/actions/merge-pr-description@main
+        with:
+          current-title: ${{ fromJSON(steps.current-pr.outputs.pr).title }}
+          current-body: ${{ fromJSON(steps.current-pr.outputs.pr).body }}
+          generated-output: ${{ steps.jules.outputs.response }}
 
-          # Append attribution
-          BODY="${BODY}
+      - name: Update PR
+        if: steps.check.outputs.skip != 'true' && steps.merged-pr.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ steps.merged-pr.outputs.title }}
+          PR_BODY: ${{ steps.merged-pr.outputs.body }}
+        run: |
+          set -euo pipefail
 
-          ---
-          *PR description generated by [Agent](https://weekendsuperhero.io)*"
-
-          gh pr edit "$PR_NUMBER" --title "$TITLE" --body "$BODY"
+          printf '%s' "$PR_BODY" > /tmp/pr-body.md
+          gh pr edit "$PR_NUMBER" --title "$PR_TITLE" --body-file /tmp/pr-body.md
           echo "PR #${PR_NUMBER} updated successfully"
+
+      - name: Report unchanged PR
+        if: steps.check.outputs.skip != 'true' && steps.merged-pr.outputs.changed != 'true'
+        run: echo "Generated title and managed description are already current"
