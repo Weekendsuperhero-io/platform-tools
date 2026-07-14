@@ -375,11 +375,21 @@ jobs:
           name: pr-review-context
           path: context/
 
+      # The prompts are markdown templates shipped by the muse-prompts
+      # composite action (referencing a remote action is what downloads the
+      # platform-tools tarball — reusable workflows never check out their own
+      # repo). Edit .github/actions/muse-prompts/prompts/*.md to tune the
+      # reviewers.
+      - name: Fetch prompt templates
+        id: prompts
+        uses: weekendsuperhero-io/platform-tools/.github/actions/muse-prompts@main
+
       - name: Build prompt
         env:
           AGENT: ${{ matrix.agent }}
           MAX_FINDINGS: ${{ inputs.max-findings }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PROMPTS_DIR: ${{ steps.prompts.outputs.dir }}
         run: |
           set -euo pipefail
           ROUND=$(jq -r '.round' context/meta.json)
@@ -388,90 +398,24 @@ jobs:
           PREV_COUNT=$(jq 'length' "context/prev_${AGENT}.json")
 
           case "$AGENT" in
-            review)
-              PREFIX="REV"
-              cat > /tmp/lens.txt << 'LENS_END'
-          Your lens: GENERAL CODE REVIEW.
-          Hunt for: logic errors and unhandled edge cases; error-handling gaps
-          (swallowed errors, unwraps/panics on fallible paths); concurrency and
-          race hazards; API misuse; breaking changes to public contracts;
-          duplicated code that should reuse an existing helper; violations of
-          the project guidelines included below.
-          Ignore: formatting/style, naming taste, and hypothetical refactors
-          with no concrete defect.
-          LENS_END
-              ;;
-            security)
-              PREFIX="SEC"
-              cat > /tmp/lens.txt << 'LENS_END'
-          Your lens: SECURITY.
-          Hunt for: injection (command, SQL, path traversal); secrets or tokens
-          hardcoded, logged, or written to disk; unsafe deserialization of
-          untrusted input; missing validation at trust boundaries (IPC,
-          network, filesystem, subprocess arguments); sandbox / entitlement /
-          permission expansions; SSRF or unvalidated URLs; crypto misuse;
-          dependency changes that expand the attack surface; PII or sensitive
-          data exposed in logs and error messages.
-          Severity discipline: reachable-by-untrusted-input = critical/high;
-          defense-in-depth hardening = medium/low.
-          LENS_END
-              ;;
-            tests)
-              PREFIX="TST"
-              cat > /tmp/lens.txt << 'LENS_END'
-          Your lens: TEST COVERAGE (of this diff, not the whole repository).
-          Method: (1) enumerate the behavior changes in this diff — new
-          features, changed logic, bug fixes; (2) map each to test changes in
-          the diff or clearly-referenced existing tests; (3) report each gap
-          as a finding naming the exact behavior plus a CONCRETE test to add:
-          suggested test name, scenario, expected result.
-          Severity: bug fix without a regression test = high; new core
-          behavior untested = high/medium; error paths, migrations, and
-          boundary conditions untested = medium; nice-to-have cases = low.
-          Non-behavioral changes (docs, CI, pure refactors with existing
-          coverage) need no tests — say so and pass.
-          LENS_END
-              ;;
+            review)   PREFIX="REV" ;;
+            security) PREFIX="SEC" ;;
+            tests)    PREFIX="TST" ;;
           esac
 
-          cat > /tmp/prompt.txt << CONTRACT_END
-          You are the "${AGENT}" reviewer in an automated three-agent pull
-          request review. Review ONLY this pull request's changes (diff plus
-          its immediate context). Cite file paths and line numbers as they
-          appear in the diff. This is round ${ROUND}.
-
-          Output a single raw JSON object — no markdown fences, no prose:
-          {
-            "verdict": "pass" | "warn" | "fail",
-            "summary": "2-4 plain-language sentences",
-            "findings": [
-              {"id": "${PREFIX}-${ROUND}-1", "severity": "critical|high|medium|low|nit",
-               "file": "path/to/file", "line": 123, "title": "short title",
-               "detail": "why this matters", "suggestion": "concrete fix"}
-            ],
-            "resolved": [
-              {"id": "<id of a PREVIOUS finding>", "status": "resolved" | "unresolved",
-               "note": "one line of evidence"}
-            ]
+          # Substitute {{TOKENS}} in a template (all values are alphanumeric).
+          render() {
+            sed -e "s/{{AGENT}}/${AGENT}/g" \
+                -e "s/{{PREFIX}}/${PREFIX}/g" \
+                -e "s/{{ROUND}}/${ROUND}/g" \
+                -e "s/{{MAX_FINDINGS}}/${MAX_FINDINGS}/g" "$1"
           }
 
-          Rules:
-          - "findings" holds NEW issues only, at most ${MAX_FINDINGS}, ordered by
-            severity, ids numbered ${PREFIX}-${ROUND}-1, ${PREFIX}-${ROUND}-2, …
-            Merge duplicates. No praise, no restating the diff, no formatting
-            nits (formatters handle style). An empty array is a fine answer.
-          - If PREVIOUS FINDINGS are provided below: verify EVERY one against
-            the current code and list each in "resolved" with status
-            resolved/unresolved plus evidence. Do NOT repeat unresolved ones in
-            "findings" — they are carried forward automatically. Focus new
-            review effort on the CHANGES SINCE LAST REVIEW section.
-          - "verdict": "fail" if any critical/high finding stands (new or
-            unresolved), "warn" if only medium/low, "pass" when clean or nits.
-          CONTRACT_END
+          render "${PROMPTS_DIR}/contract.md" > /tmp/prompt.txt
 
           {
             echo ""
-            cat /tmp/lens.txt
+            render "${PROMPTS_DIR}/${AGENT}.md"
             echo ""
             echo "=== PR TITLE ==="
             echo "$PR_TITLE"

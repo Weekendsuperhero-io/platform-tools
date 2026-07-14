@@ -197,6 +197,18 @@ stricter — an agent cannot green-light findings it left open.
 Guidelines inputs are comma-separated repo paths whose contents are appended
 to the prompt (capped per file).
 
+The prompt texts themselves are markdown templates in
+[`.github/actions/muse-prompts/prompts/`](../.github/actions/muse-prompts/prompts/) —
+[`contract.md`](../.github/actions/muse-prompts/prompts/contract.md) (the
+shared JSON output contract) plus one lens file per agent
+([`review.md`](../.github/actions/muse-prompts/prompts/review.md),
+[`security.md`](../.github/actions/muse-prompts/prompts/security.md),
+[`tests.md`](../.github/actions/muse-prompts/prompts/tests.md)). Edit those
+files to tune the reviewers; `{{AGENT}}`, `{{PREFIX}}`, `{{ROUND}}`, and
+`{{MAX_FINDINGS}}` are substituted at runtime. They ship to the runner via the
+tiny `muse-prompts` composite action (reusable workflows never check out their
+own repo; referencing a remote action is what materializes the files).
+
 ### Label taxonomy
 
 | Label | Meaning |
