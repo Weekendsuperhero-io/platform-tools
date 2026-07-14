@@ -15,10 +15,20 @@
 #       contents: write
 #     uses: <owner>/<repo>/.github/workflows/reusable-changelog.yml@main
 #     with:
-#       changelog-path: CHANGELOG.md          # optional
-#       pr-branch-prefix: "chore/changelog-"  # optional
+#       changelog-path: CHANGELOG.md                    # optional
+#       internal-changelog-path: CHANGELOG_INTERNAL.md  # optional — enables the split
+#       pr-branch-prefix: "chore/changelog-"            # optional
+#       runs-on: warp-ubuntu-latest-x64-4x              # optional
 #     secrets: inherit
 # ```
+#
+# Split mode (internal-changelog-path set):
+#   One Jules call classifies every commit into USER-FACING (what a user of the
+#   app can perceive — ships verbatim as release notes / updater notes /
+#   TestFlight "What to Test") vs INTERNAL (refactors, CI, deps, plumbing —
+#   recorded but never shown to users), and both files are patched under their
+#   `## [Unreleased]` headings in a single PR. With the input unset the
+#   workflow behaves exactly as before: one file, one markdown blob.
 
 name: Reusable Changelog
 
@@ -26,10 +36,20 @@ on:
   workflow_call:
     inputs:
       changelog-path:
-        description: "Path to the CHANGELOG file"
+        description: "Path to the user-facing CHANGELOG file"
         type: string
         required: false
         default: "CHANGELOG.md"
+      internal-changelog-path:
+        description: "Path to the internal changelog. Empty (default) keeps the single-file behavior; setting it enables the user-facing/internal split."
+        type: string
+        required: false
+        default: ""
+      runs-on:
+        description: "Runner label for the job (e.g. warp-ubuntu-latest-x64-4x)"
+        type: string
+        required: false
+        default: "ubuntu-latest"
       pr-branch-prefix:
         description: "Prefix for the branch created by this workflow"
         type: string
@@ -94,7 +114,7 @@ on:
 jobs:
   changelog:
     name: Generate Changelog PR
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
 
     permissions:
       contents: write
@@ -123,9 +143,9 @@ jobs:
       - name: Generate GitHub App token
         if: steps.app-auth-config.outputs.enabled == 'true'
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.JULES_PR_CLIENT_ID }}
+          client-id: ${{ secrets.JULES_PR_CLIENT_ID }}
           private-key: ${{ secrets.JULES_PR_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
@@ -148,7 +168,7 @@ jobs:
           echo "identity=${BOT_NAME} <${BOT_EMAIL}>" >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           token: ${{ steps.app-token.outputs.token || github.token }}
           fetch-depth: 0
@@ -157,18 +177,16 @@ jobs:
         shell: bash
         env:
           CHANGELOG_PATH: ${{ inputs.changelog-path }}
+          INTERNAL_PATH: ${{ inputs.internal-changelog-path }}
           UNRELEASED: ${{ inputs.unreleased-heading }}
         run: |
           set -euo pipefail
 
-          if [ -f "$CHANGELOG_PATH" ]; then
-            exit 0
-          fi
+          if [ ! -f "$CHANGELOG_PATH" ]; then
+            echo "Changelog file not found. Creating $CHANGELOG_PATH"
+            mkdir -p "$(dirname "$CHANGELOG_PATH")"
 
-          echo "Changelog file not found. Creating $CHANGELOG_PATH"
-          mkdir -p "$(dirname "$CHANGELOG_PATH")"
-
-          cat > "$CHANGELOG_PATH" <<EOF
+            cat > "$CHANGELOG_PATH" <<EOF
           # Changelog
 
           All notable changes to this project will be documented in this file.
@@ -178,12 +196,31 @@ jobs:
 
           ${UNRELEASED}
           EOF
+          fi
+
+          if [ -n "$INTERNAL_PATH" ] && [ ! -f "$INTERNAL_PATH" ]; then
+            echo "Internal changelog not found. Creating $INTERNAL_PATH"
+            mkdir -p "$(dirname "$INTERNAL_PATH")"
+
+            cat > "$INTERNAL_PATH" <<EOF
+          # Internal Changelog
+
+          Mechanics and internals — refactors, CI/build, dependencies, protocol
+          plumbing — recorded per release so nothing is lost. This file is NOT
+          shipped to users; the user-facing changelog lives in ${CHANGELOG_PATH}.
+
+          The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+          ${UNRELEASED}
+          EOF
+          fi
 
       - name: Find changes since last changelog update
         id: changes
         shell: bash
         env:
           CHANGELOG_PATH: ${{ inputs.changelog-path }}
+          INTERNAL_PATH: ${{ inputs.internal-changelog-path }}
           FALLBACK_COUNT: ${{ inputs.fallback-commit-count }}
           MAX_COMMITS: ${{ inputs.max-commit-messages }}
         run: |
@@ -205,11 +242,14 @@ jobs:
           echo "Last changelog commit: $LAST_CHANGELOG_SHA"
           echo "last_sha=$LAST_CHANGELOG_SHA" >> "$GITHUB_OUTPUT"
 
+          EXCLUDE_PATHS=(":!$CHANGELOG_PATH")
+          [ -n "$INTERNAL_PATH" ] && EXCLUDE_PATHS+=(":!$INTERNAL_PATH")
+
           git log -n "$MAX_COMMITS" "$RANGE_SPEC" \
             --no-merges \
             --date=iso-strict \
             --format='=== COMMIT ===%nHash: %H%nAuthor: %an <%ae>%nDate: %ad%nSubject: %s%nBody:%n%b%n' \
-            -- ":!$CHANGELOG_PATH" \
+            -- "${EXCLUDE_PATHS[@]}" \
             > /tmp/commits.txt
 
           COMMIT_COUNT=$(grep -c '^=== COMMIT ===$' /tmp/commits.txt || true)
@@ -230,6 +270,7 @@ jobs:
         shell: bash
         env:
           CHANGELOG_PATH: ${{ inputs.changelog-path }}
+          INTERNAL_PATH: ${{ inputs.internal-changelog-path }}
           CUSTOM_PROMPT: ${{ inputs.custom-prompt }}
         run: |
           set -euo pipefail
@@ -238,7 +279,59 @@ jobs:
             cat > /tmp/prompt.txt << 'EOF'
           EOF
             echo "$CUSTOM_PROMPT" >> /tmp/prompt.txt
+          elif [ -n "$INTERNAL_PATH" ]; then
+            # ── Split mode: one call classifies user-facing vs internal ──
+            head -60 "$CHANGELOG_PATH" > /tmp/current_changelog.txt
+
+            cat > /tmp/prompt.txt << 'HEREDOC_END'
+          You are updating TWO changelogs for a desktop app, both following Keep a Changelog
+          (https://keepachangelog.com/en/1.1.0/):
+
+          1. USER-FACING — shipped verbatim to end users as release notes (GitHub Release
+             body, in-app updater notes, TestFlight "What to Test"). Written for a
+             non-developer user of the app.
+          2. INTERNAL — an engineering record of mechanics. Never shown to users.
+
+          Classify every change from the commits below:
+          - USER-FACING: anything a user can perceive — visible behavior/UX, new
+            capabilities, perceptible performance, crash/reliability fixes, security
+            fixes with user impact, platform support.
+          - INTERNAL: refactors with no behavior change, CI/CD and build tooling,
+            dependency bumps, tests, developer docs, protocol/wire plumbing,
+            schema/migration mechanics, logging/tracing, cleanup.
+          - A change with BOTH a user-visible face and mechanics appears in BOTH lists
+            with different wording (user words vs mechanics).
+          - Unsure whether users would notice? Put it in INTERNAL — keep the user
+            changelog clean. Prefer omission over a vague user-facing bullet.
+          - A dependency bump that fixes a user-visible bug IS user-facing.
+
+          Style for USER-FACING bullets:
+          - `- **Feature name** — user-visible outcome.` The name is a product noun,
+            never a code symbol.
+          - Product voice, present tense, benefit-first. No commit-speak (bump, wip,
+            refactor, plumb, wire), no ticket IDs (e.g. WEE-123), no crate/module/file
+            names, no PR numbers.
+          - Merge all commits about one feature into ONE bullet. Never one bullet per
+            commit.
+
+          Style for INTERNAL bullets:
+          - Same `- **Name** — description.` shape, but ticket IDs, crate names, and
+            technical rationale are welcome. May be more granular.
+
+          Output a single JSON object, no markdown fences, no explanation:
+          {
+            "user_facing": {"Added": ["- **...** — ..."], "Changed": [], "Fixed": [], "Removed": [], "Security": [], "Deprecated": []},
+            "internal":    {"Added": [], "Changed": [], "Fixed": [], "Removed": [], "Security": [], "Deprecated": []}
+          }
+          Every array element is one complete markdown bullet. Omit or leave empty any
+          category with no entries.
+
+          === CURRENT USER-FACING CHANGELOG FORMAT (for reference) ===
+          HEREDOC_END
+
+            cat /tmp/current_changelog.txt >> /tmp/prompt.txt
           else
+            # ── Legacy single-file mode (unchanged behavior) ──
             head -60 "$CHANGELOG_PATH" > /tmp/current_changelog.txt
 
             cat > /tmp/prompt.txt << 'HEREDOC_END'
@@ -264,11 +357,6 @@ jobs:
           echo "=== FULL COMMITS ===" >> /tmp/prompt.txt
           cat /tmp/commits.txt >> /tmp/prompt.txt
 
-          PROMPT_CONTENT=$(cat /tmp/prompt.txt)
-          echo "prompt<<PROMPT_EOF" >> "$GITHUB_OUTPUT"
-          echo "$PROMPT_CONTENT" >> "$GITHUB_OUTPUT"
-          echo "PROMPT_EOF" >> "$GITHUB_OUTPUT"
-
       - name: Generate changelog entry with Jules
         if: steps.changes.outputs.skip != 'true'
         id: jules
@@ -277,8 +365,8 @@ jobs:
           title: "Changelog Update"
           jules_api_key: ${{ secrets.JULES_API_KEY }}
 
-      - name: Patch changelog
-        if: steps.changes.outputs.skip != 'true'
+      - name: Patch changelog (single-file mode)
+        if: steps.changes.outputs.skip != 'true' && inputs.internal-changelog-path == ''
         shell: bash
         env:
           CHANGELOG_PATH: ${{ inputs.changelog-path }}
@@ -301,11 +389,13 @@ jobs:
             mv /tmp/changelog_with_heading.md "$CHANGELOG_PATH"
           fi
 
-          awk -v entries="$NEW_ENTRIES" -v heading="$UNRELEASED" '
+          # entries via ENVIRON, not -v: BSD awk (macOS runners) rejects
+          # newlines in -v values, and ENVIRON skips escape processing.
+          entries="$NEW_ENTRIES" awk -v heading="$UNRELEASED" '
             $0 == heading {
               print $0
               print ""
-              print entries
+              print ENVIRON["entries"]
               next
             }
             { print }
@@ -316,9 +406,110 @@ jobs:
           echo "=== Updated changelog (first 40 lines) ==="
           head -40 "$CHANGELOG_PATH"
 
+      - name: Patch changelogs (split mode)
+        if: steps.changes.outputs.skip != 'true' && inputs.internal-changelog-path != ''
+        shell: bash
+        env:
+          CHANGELOG_PATH: ${{ inputs.changelog-path }}
+          INTERNAL_PATH: ${{ inputs.internal-changelog-path }}
+          UNRELEASED: ${{ inputs.unreleased-heading }}
+          NEW_ENTRIES: ${{ steps.jules.outputs.response }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$NEW_ENTRIES" ]; then
+            echo "::error::No output from Jules"
+            exit 1
+          fi
+
+          # Strip optional code fences and validate the JSON envelope.
+          printf '%s' "$NEW_ENTRIES" | sed 's/^```json//;s/^```//;s/```$//' | tr -d '\r' > /tmp/changelog_parts.txt
+          if ! jq -e 'type == "object"' /tmp/changelog_parts.txt > /dev/null 2>&1; then
+            echo "::error::Jules output is not the expected JSON object"
+            head -40 /tmp/changelog_parts.txt
+            exit 1
+          fi
+
+          # Render one part ("user_facing" | "internal") to Keep-a-Changelog
+          # markdown: ### headings in canonical order, only non-empty ones.
+          render_part() {
+            jq -r --arg part "$1" '
+              (.[$part] // {}) as $p
+              | ["Added","Changed","Fixed","Removed","Security","Deprecated"]
+              | map(. as $cat
+                  | ($p[$cat] // [])
+                  | if length > 0 then "### \($cat)\n\n\(join("\n"))\n" else empty end)
+              | join("\n")' /tmp/changelog_parts.txt
+          }
+
+          insert_under_unreleased() {
+            local file="$1" entries="$2"
+
+            if ! grep -Fxq "$UNRELEASED" "$file"; then
+              echo "Unreleased heading missing in $file. Prepending '$UNRELEASED'."
+              {
+                printf '%s\n\n' "$UNRELEASED"
+                cat "$file"
+              } > /tmp/changelog_with_heading.md
+              mv /tmp/changelog_with_heading.md "$file"
+            fi
+
+            # entries via ENVIRON, not -v: BSD awk (macOS runners) rejects
+            # newlines in -v values, and ENVIRON skips escape processing.
+            entries="$entries" awk -v heading="$UNRELEASED" '
+              $0 == heading {
+                print $0
+                print ""
+                print ENVIRON["entries"]
+                next
+              }
+              { print }
+            ' "$file" > /tmp/changelog_new.md
+            mv /tmp/changelog_new.md "$file"
+          }
+
+          USER_MD=$(render_part user_facing)
+          INTERNAL_MD=$(render_part internal)
+
+          if [ -z "$USER_MD" ] && [ -z "$INTERNAL_MD" ]; then
+            echo "::error::Jules returned no entries in either part"
+            exit 1
+          fi
+
+          if [ -n "$USER_MD" ]; then
+            insert_under_unreleased "$CHANGELOG_PATH" "$USER_MD"
+            echo "=== Updated $CHANGELOG_PATH (first 40 lines) ==="
+            head -40 "$CHANGELOG_PATH"
+          else
+            echo "No user-facing entries this round — $CHANGELOG_PATH untouched"
+          fi
+
+          if [ -n "$INTERNAL_MD" ]; then
+            insert_under_unreleased "$INTERNAL_PATH" "$INTERNAL_MD"
+            echo "=== Updated $INTERNAL_PATH (first 40 lines) ==="
+            head -40 "$INTERNAL_PATH"
+          else
+            echo "No internal entries this round — $INTERNAL_PATH untouched"
+          fi
+
+      - name: Compute PR paths
+        if: steps.changes.outputs.skip != 'true'
+        id: paths
+        shell: bash
+        env:
+          CHANGELOG_PATH: ${{ inputs.changelog-path }}
+          INTERNAL_PATH: ${{ inputs.internal-changelog-path }}
+        run: |
+          {
+            echo "add_paths<<PATHS_EOF"
+            echo "$CHANGELOG_PATH"
+            [ -n "$INTERNAL_PATH" ] && echo "$INTERNAL_PATH"
+            echo "PATHS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create Pull Request
         if: steps.changes.outputs.skip != 'true'
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ steps.app-token.outputs.token || github.token }}
           author: ${{ steps.app-bot.outputs.identity || 'github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>' }}
@@ -327,4 +518,4 @@ jobs:
           title: ${{ inputs.pr-title }}
           body: ${{ format(inputs.pr-body-template, steps.changes.outputs.commit_count) }}
           branch: "${{ inputs.pr-branch-prefix }}${{ github.run_id }}"
-          add-paths: ${{ inputs.changelog-path }}
+          add-paths: ${{ steps.paths.outputs.add_paths }}
