@@ -1,59 +1,9 @@
-# Reusable workflow: label-gated PR review loop with three Muse review agents (Jules-powered)
-# (code review · security · test coverage).
+# Reusable workflow: label-gated PR review loop with three Muse review agents
+# (code review · security · test coverage), powered by Jules.
 #
-# Usage in a consuming repo:
-#
-# ```yaml
-# name: PR Review (Muse)
-# on:
-#   pull_request:
-#     types: [labeled, synchronize]
-#
-# jobs:
-#   review:
-#     # Exact-match guard: outcome/state labels we add ourselves (muse:reviewing,
-#     # review:approved, …) must NOT re-enter the concurrency group below.
-#     if: >-
-#       github.event.action == 'synchronize'
-#       || github.event.label.name == 'muse:review'
-#       || github.event.label.name == 'muse:force'
-#     # Job-level (not workflow-level) so skipped runs never claim the group.
-#     # A new `muse:review` press or a push cancels a stale in-flight round.
-#     concurrency:
-#       group: pr-review-${{ github.event.pull_request.number }}
-#       cancel-in-progress: true
-#     permissions:
-#       contents: read
-#       issues: write
-#       pull-requests: write
-#     uses: <owner>/<repo>/.github/workflows/reusable-pr-review.yml@main
-#     with:
-#       runs-on: warp-ubuntu-latest-x64-4x
-#       review-guidelines: "RULES.md"
-#       security-guidelines: "CREDENTIALS.md,acp-fs/SANDBOXING.md"
-#     secrets: inherit
-# ```
-#
-# The loop:
-#   1. Adding the `muse:review` label is the button. The workflow removes it
-#      immediately (re-arming it) and runs one round: all agents in parallel,
-#      one Jules session each.
-#   2. Each agent maintains exactly ONE sticky comment on the PR (edited in
-#      place, never appended), with a hidden marker recording the reviewed SHA,
-#      round number, and the open findings as machine-readable state.
-#   3. Outcome labels carry the verdicts (`review:approved|needs-changes`,
-#      `security:clear|flagged`, `tests:sufficient|needs-work`, plus
-#      `muse:approved` when everything is positive).
-#   4. New commits (`synchronize`) strip the now-stale outcome labels and
-#      cancel any in-flight round. Re-adding `muse:review` runs a DELTA
-#      round: agents re-verify each previous finding (resolved/unresolved)
-#      and review only the changes since the last reviewed SHA — no wasted
-#      turns re-litigating settled findings.
-#   5. Same-SHA presses are no-ops unless the `muse:force` label is used.
-#
-# Verdict → labels is derived deterministically from the OPEN findings
-# (critical/high ⇒ fail, medium ⇒ warn, else the model's own verdict), so a
-# model that under-reports severity can't green-light its own findings.
+# Docs — loop mechanics, delta rounds, label taxonomy, lenses, inputs, and a
+# copy-paste caller (whose exact-match label guard + job-level concurrency
+# are load-bearing): docs/muse-workflows.md
 
 name: Reusable PR Review
 

@@ -1,34 +1,9 @@
-# Reusable workflow: Generate changelog entries using Jules AI
+# Reusable workflow: changelog entries from commits via Jules — single-file
+# Keep-a-Changelog mode by default, or a user-facing/internal split when
+# `internal-changelog-path` is set.
 #
-# Usage in a consuming repo:
-#
-# ```yaml
-# name: Update Changelog
-# on:
-#   workflow_dispatch:
-#   schedule:
-#     - cron: "0 0 * * 1"  # every Monday
-#
-# jobs:
-#   changelog:
-#     permissions:
-#       contents: write
-#     uses: <owner>/<repo>/.github/workflows/reusable-changelog.yml@main
-#     with:
-#       changelog-path: CHANGELOG.md                    # optional
-#       internal-changelog-path: CHANGELOG_INTERNAL.md  # optional — enables the split
-#       pr-branch-prefix: "chore/changelog-"            # optional
-#       runs-on: warp-ubuntu-latest-x64-4x              # optional
-#     secrets: inherit
-# ```
-#
-# Split mode (internal-changelog-path set):
-#   One Jules call classifies every commit into USER-FACING (what a user of the
-#   app can perceive — ships verbatim as release notes / updater notes /
-#   TestFlight "What to Test") vs INTERNAL (refactors, CI, deps, plumbing —
-#   recorded but never shown to users), and both files are patched under their
-#   `## [Unreleased]` headings in a single PR. With the input unset the
-#   workflow behaves exactly as before: one file, one markdown blob.
+# Docs — usage snippet, split-mode classification rules, inputs:
+# docs/muse-workflows.md
 
 name: Reusable Changelog
 
