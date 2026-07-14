@@ -1,0 +1,16 @@
+{
+  "$comment": "Canonical org-wide label set for the Muse PR workflows (review loop triggers, state, and per-agent outcomes). Synced to repos by scripts/sync-repo-labels.sh; the review workflow also self-bootstraps these on first use in any repo.",
+  "labels": [
+    { "name": "muse:review", "color": "ededed", "description": "Request a Muse review round (re-add to re-run)" },
+    { "name": "muse:force", "color": "ededed", "description": "Force a Muse round even if this SHA was already reviewed" },
+    { "name": "muse:reviewing", "color": "fbca04", "description": "Muse review round in progress" },
+    { "name": "muse:approved", "color": "0e8a16", "description": "All Muse review agents positive" },
+    { "name": "muse:error", "color": "b60205", "description": "A Muse review agent failed — see workflow run" },
+    { "name": "review:approved", "color": "0e8a16", "description": "Muse code review: no blocking findings" },
+    { "name": "review:needs-changes", "color": "d93f0b", "description": "Muse code review: blocking findings open" },
+    { "name": "security:clear", "color": "0e8a16", "description": "Muse security review: no blocking findings" },
+    { "name": "security:flagged", "color": "b60205", "description": "Muse security review: blocking findings open" },
+    { "name": "tests:sufficient", "color": "0e8a16", "description": "Muse test review: coverage adequate for this diff" },
+    { "name": "tests:needs-work", "color": "d93f0b", "description": "Muse test review: missing tests for this diff" }
+  ]
+}

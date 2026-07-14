@@ -1,0 +1,29 @@
+# Ships the Muse review agents' prompt templates to the runner.
+#
+# The templates are the markdown files in ./prompts — contract.md (the shared
+# JSON output contract) plus one lens file per agent (review.md, security.md,
+# tests.md). Edit those files to tune the reviewers; {{AGENT}}, {{PREFIX}},
+# {{ROUND}}, and {{MAX_FINDINGS}} are substituted at runtime by the workflow.
+#
+# Why an action at all: reusable workflows never check out their own repo, so
+# files next to the YAML don't exist on the runner. Referencing this composite
+# action remotely is what downloads the platform-tools tarball; action_path
+# then points at this directory.
+
+name: "Muse review prompts"
+description: "Exposes the Muse review prompt templates directory to the calling job"
+
+outputs:
+  dir:
+    description: "Absolute path to the prompt templates directory"
+    value: ${{ steps.locate.outputs.dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Locate prompt templates
+      id: locate
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: echo "dir=${ACTION_PATH}/prompts" >> "$GITHUB_OUTPUT"
