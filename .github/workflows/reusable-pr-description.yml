@@ -12,11 +12,24 @@
 #   update-pr:
 #     permissions:
 #       contents: read
+#       pull-requests: write
 #     uses: <owner>/<repo>/.github/workflows/reusable-pr-description.yml@main
 #     with:
 #       trigger-phrase: "@agent pr-title"   # optional
+#       runs-on: warp-ubuntu-latest-x64-4x  # optional (defaults to ubuntu-latest)
 #     secrets: inherit
 # ```
+#
+# Linear integration:
+#   A deterministic pre-step extracts Linear issue IDs from the branch name,
+#   commit messages, and the current PR body. The LLM only picks the verb
+#   (Closes/Fixes/Resolves/Completes vs Part of/Refs) per already-extracted ID;
+#   the workflow renders the final `## Linear` section itself, so IDs can never
+#   be hallucinated or silently dropped. When a LINEAR_API_KEY secret is
+#   available, IDs are enriched with issue titles (cosmetic, non-fatal) and
+#   definitive not-founds are pruned. Linear's GitHub integration reads the
+#   magic words in the PR body: closing verbs move the issue when the PR
+#   merges; linking verbs only relate it.
 
 name: Reusable PR Description
 
@@ -28,6 +41,11 @@ on:
         type: string
         required: false
         default: "@agent pr-title"
+      runs-on:
+        description: "Runner label for the job (e.g. warp-ubuntu-latest-x64-4x)"
+        type: string
+        required: false
+        default: "ubuntu-latest"
       base-branch:
         description: "The branch to diff against (defaults to the PR base branch)"
         type: string
@@ -69,6 +87,16 @@ on:
         type: string
         required: false
         default: ""
+      linear-enabled:
+        description: "Detect Linear issue IDs and render a `## Linear` section in the PR body"
+        type: boolean
+        required: false
+        default: true
+      linear-id-pattern:
+        description: "Regex (POSIX ERE, matched case-insensitively) for Linear issue identifiers"
+        type: string
+        required: false
+        default: "[A-Za-z][A-Za-z0-9]+-[0-9]+"
     secrets:
       JULES_API_KEY:
         required: true
@@ -76,14 +104,18 @@ on:
         required: false
       JULES_PR_PRIVATE_KEY:
         required: false
+      LINEAR_API_KEY:
+        description: "Optional Linear API key — enriches ticket IDs with titles and prunes false-positive IDs"
+        required: false
 
 jobs:
   update-pr:
     name: Update PR Title & Description
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
 
     permissions:
       contents: read
+      pull-requests: write
 
     steps:
       - name: Check trigger phrase
@@ -128,15 +160,15 @@ jobs:
       - name: Generate GitHub App token
         if: steps.app-auth-config.outputs.enabled == 'true'
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.JULES_PR_CLIENT_ID }}
+          client-id: ${{ secrets.JULES_PR_CLIENT_ID }}
           private-key: ${{ secrets.JULES_PR_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
       - name: Checkout PR head
         if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
           token: ${{ steps.app-token.outputs.token || github.token }}
@@ -237,6 +269,120 @@ jobs:
             fi
           done < /tmp/changed_files.txt
 
+      # ── Linear: deterministic ID extraction ─────────────────────────────
+      # Identity work is never delegated to the LLM: IDs come from the branch
+      # name (primary ticket), commit messages, and the current PR body. The
+      # LLM later only chooses verbs for these IDs.
+      - name: Extract Linear issue references
+        if: inputs.linear-enabled && (steps.check.outputs.skip != 'true' || github.event_name != 'pull_request')
+        id: linear
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref_name }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          ID_PATTERN: ${{ inputs.linear-id-pattern }}
+        run: |
+          set -euo pipefail
+
+          # Acronym-style false positives that match the TEAM-123 shape but are
+          # never tickets. Branch-derived IDs are exempt (deliberate naming).
+          FALSE_POSITIVES='^(UTF|SHA|ISO|RFC|CVE|TLS|AES|HTTP|SSH|GPG|PGP|MD|CRC|X)-'
+
+          extract() { grep -oiE "$ID_PATTERN" 2>/dev/null | tr '[:lower:]' '[:upper:]' || true; }
+
+          printf '%s\n' "$HEAD_REF" | extract > /tmp/linear_branch_ids.txt
+          {
+            cat /tmp/linear_branch_ids.txt
+            [ -f /tmp/commits.txt ] && extract < /tmp/commits.txt
+            printf '%s\n' "$PR_BODY" | extract
+          } | awk '!seen[$0]++' > /tmp/linear_all_ids.txt
+
+          BRANCH_PRIMARY=$(head -1 /tmp/linear_branch_ids.txt || true)
+
+          # candidates: [{id, verb, source}] — verb starts as the default
+          # (branch's own ticket → Closes, everything else → Part of).
+          jq -R -n --arg primary "$BRANCH_PRIMARY" --arg fp "$FALSE_POSITIVES" '
+            [inputs | select(length > 0)
+              | select((test($fp) | not) or . == $primary)
+              | {id: .,
+                 verb: (if . == $primary then "Closes" else "Part of" end),
+                 source: (if . == $primary then "branch" else "commits/body" end)}
+            ]' /tmp/linear_all_ids.txt > /tmp/linear_candidates.json
+
+          COUNT=$(jq 'length' /tmp/linear_candidates.json)
+          echo "Found $COUNT Linear issue reference(s): $(jq -r '[.[].id] | join(", ")' /tmp/linear_candidates.json)"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+          # Preserve human intent: if the current PR body already has a
+          # `## Linear` section whose verbs differ from the marker we last
+          # wrote (or has no marker at all), those verbs were human-edited —
+          # they win over both defaults and the LLM.
+          printf '%s\n' "$PR_BODY" | awk '/^## Linear[[:space:]]*$/{f=1; next} /^## /{f=0} f' > /tmp/linear_existing_section.txt
+          MARKER=$(printf '%s\n' "$PR_BODY" | grep -oE '<!-- linear-managed: [^>]* -->' | head -1 || true)
+
+          : > /tmp/linear_human_verbs.txt
+          if [ -s /tmp/linear_existing_section.txt ]; then
+            grep -oiE "(Closes|Fixes|Resolves|Completes|Part of|Refs|References|Related to) ${ID_PATTERN}" \
+              /tmp/linear_existing_section.txt > /tmp/linear_current_verbs.txt || true
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              ID=$(printf '%s' "$line" | grep -oiE "$ID_PATTERN" | tail -1 | tr '[:lower:]' '[:upper:]')
+              VERB=$(printf '%s' "$line" | sed -E 's/[[:space:]][A-Za-z][A-Za-z0-9]+-[0-9]+$//')
+              if [ -z "$MARKER" ] || ! printf '%s' "$MARKER" | grep -qF "${ID}=${VERB}"; then
+                printf '%s\t%s\n' "$ID" "$VERB" >> /tmp/linear_human_verbs.txt
+              fi
+            done < /tmp/linear_current_verbs.txt
+          fi
+
+      # Cosmetic enrichment only — titles make the section readable, and a
+      # definitive "issue not found" prunes acronym false positives. Any
+      # API failure degrades to bare IDs; it never fails the job.
+      - name: Enrich Linear issues (titles)
+        if: inputs.linear-enabled && steps.linear.outputs.count != '0' && steps.linear.outputs.count != ''
+        shell: bash
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+        run: |
+          set -uo pipefail
+          if [ -z "${LINEAR_API_KEY:-}" ]; then
+            echo "LINEAR_API_KEY not set — skipping enrichment"
+            exit 0
+          fi
+
+          ENRICHED='[]'
+          while IFS= read -r ID; do
+            RESP=$(curl -sS --max-time 15 https://api.linear.app/graphql \
+              -H "Content-Type: application/json" \
+              -H "Authorization: ${LINEAR_API_KEY}" \
+              -d "$(jq -n --arg id "$ID" '{query: "query($id: String!) { issue(id: $id) { identifier title state { name } } }", variables: {id: $id}}')" \
+              2>/dev/null) || RESP=""
+
+            TITLE=$(printf '%s' "$RESP" | jq -r '.data.issue.title // empty' 2>/dev/null || true)
+            # "data.issue == null" with a well-formed response is a definitive
+            # not-found; transport/auth errors are indeterminate → keep the id.
+            NOT_FOUND=false
+            if [ -n "$RESP" ] && [ "$(printf '%s' "$RESP" | jq -r 'if (.data? | type == "object") and (.data | has("issue")) and .data.issue == null then "yes" else "no" end' 2>/dev/null)" = "yes" ]; then
+              NOT_FOUND=true
+            fi
+            ENRICHED=$(printf '%s' "$ENRICHED" | jq --arg id "$ID" --arg title "$TITLE" --argjson nf "$NOT_FOUND" \
+              '. + [{id: $id, title: $title, not_found: $nf}]')
+          done < <(jq -r '.[].id' /tmp/linear_candidates.json)
+
+          printf '%s' "$ENRICHED" > /tmp/linear_enriched.json
+
+          # Prune definitive not-founds, except the branch-derived primary
+          # (deliberate naming beats a possibly-permission-limited lookup).
+          if jq --slurpfile e /tmp/linear_enriched.json '
+               [.[] | . as $c
+                 | ([ $e[0][] | select(.id == $c.id) ] | .[0]) as $match
+                 | select($match == null or ($match.not_found | not) or $c.source == "branch")
+                 | . + {title: ($match.title // "")}]
+             ' /tmp/linear_candidates.json > /tmp/linear_candidates_enriched.json 2>/dev/null; then
+            mv /tmp/linear_candidates_enriched.json /tmp/linear_candidates.json
+          fi
+
+          echo "Enriched candidates: $(jq -c '[.[] | {id, title}]' /tmp/linear_candidates.json)"
+
       - name: Build prompt
         if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
         shell: bash
@@ -249,7 +395,43 @@ jobs:
           EOF
             echo "$CUSTOM_PROMPT" >> /tmp/prompt.txt
           else
-            cat > /tmp/prompt.txt << 'HEREDOC_END'
+            HAS_LINEAR=false
+            if [ -s /tmp/linear_candidates.json ] && [ "$(jq 'length' /tmp/linear_candidates.json 2>/dev/null || echo 0)" != "0" ]; then
+              HAS_LINEAR=true
+            fi
+
+            if [ "$HAS_LINEAR" = "true" ]; then
+              cat > /tmp/prompt.txt << 'HEREDOC_END'
+          You are writing a pull request title and description for a Tauri v2 desktop app.
+
+          Generate a JSON object with exactly three fields:
+          - "title": concise PR title under 70 chars, conventional commit format (feat:, fix:, refactor:, etc.)
+          - "body": markdown with these sections:
+            ## Summary (3-5 bullet points)
+            ## Changes (grouped by area)
+            ## Test plan (bulleted checklist)
+          - "linear": an array with one entry per issue listed under === LINEAR ISSUES === below,
+            each {"id": "<exact id from the list>", "verb": "<verb>"}.
+            Pick the verb from the change's intent as evidenced by the commits/diff:
+            - Use a CLOSING verb ("Closes", "Fixes", "Resolves", "Completes") when this PR
+              finishes the work that issue describes. Prefer "Fixes" for bug fixes and
+              "Closes" otherwise.
+            - Use a LINKING verb ("Part of", "Refs") when the PR only advances or relates
+              to the issue without finishing it.
+            - Use "None" ONLY for an entry that is clearly not a project ticket
+              (e.g. an acronym like UTF-8 that slipped through extraction).
+            Never invent new ids, never omit a listed id, and do NOT include any
+            Linear/ticket section inside "body" — the workflow renders that separately.
+
+          Output ONLY the raw JSON object. No markdown fences. No explanation.
+          HEREDOC_END
+
+              echo "" >> /tmp/prompt.txt
+              echo "=== LINEAR ISSUES ===" >> /tmp/prompt.txt
+              jq -r '.[] | "- \(.id)\(if (.title // "") != "" then " — \(.title)" else "" end) (default verb: \(.verb)\(if .source == "branch" then ", from branch name" else "" end))"' \
+                /tmp/linear_candidates.json >> /tmp/prompt.txt
+            else
+              cat > /tmp/prompt.txt << 'HEREDOC_END'
           You are writing a pull request title and description for a Tauri v2 desktop app.
 
           Generate a JSON object with exactly two fields:
@@ -261,6 +443,7 @@ jobs:
 
           Output ONLY the raw JSON object. No markdown fences. No explanation.
           HEREDOC_END
+            fi
           fi
 
           echo "" >> /tmp/prompt.txt
@@ -289,12 +472,6 @@ jobs:
             cat /tmp/diff.txt >> /tmp/prompt.txt
           fi
 
-          # Store full prompt as output for the composite action
-          PROMPT_CONTENT=$(cat /tmp/prompt.txt)
-          echo "prompt<<PROMPT_EOF" >> "$GITHUB_OUTPUT"
-          echo "$PROMPT_CONTENT" >> "$GITHUB_OUTPUT"
-          echo "PROMPT_EOF" >> "$GITHUB_OUTPUT"
-
       - name: Generate PR title and description with Jules
         if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
         id: jules
@@ -310,6 +487,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           CURRENT_TITLE: ${{ github.event.pull_request.title }}
+          CURRENT_BODY: ${{ github.event.pull_request.body }}
           JULES_OUTPUT: ${{ steps.jules.outputs.response }}
         run: |
           # Try parsing as JSON first
@@ -317,11 +495,57 @@ jobs:
 
           TITLE=$(echo "$OUTPUT" | jq -r '.title // empty' 2>/dev/null)
           BODY=$(echo "$OUTPUT" | jq -r '.body // empty' 2>/dev/null)
+          LLM_LINEAR=$(echo "$OUTPUT" | jq -c '.linear // []' 2>/dev/null || echo '[]')
+          [ -z "$LLM_LINEAR" ] && LLM_LINEAR='[]'
 
           if [ -z "$TITLE" ] || [ -z "$BODY" ]; then
             echo "Jules output is not JSON — using raw output as description"
             TITLE="${CURRENT_TITLE}"
             BODY="$JULES_OUTPUT"
+            LLM_LINEAR='[]'
+          fi
+
+          # ── Deterministic `## Linear` section ──────────────────────────
+          # The workflow owns the section: LLM verbs are accepted only for
+          # extracted IDs and only from the allowlist; anything the model
+          # dropped comes back with its default verb; human-edited verbs
+          # (detected in the extract step) override everything. A hidden
+          # marker records what we wrote so the next run can tell machine
+          # output from human edits.
+          if [ -s /tmp/linear_candidates.json ] && [ "$(jq 'length' /tmp/linear_candidates.json 2>/dev/null || echo 0)" != "0" ]; then
+            # Strip any Linear/ticket section the model put in the body anyway.
+            BODY=$(printf '%s\n' "$BODY" | awk '/^## Linear/{drop=1; next} /^## /{drop=0} !drop')
+
+            HUMAN_JSON='[]'
+            if [ -s /tmp/linear_human_verbs.txt ]; then
+              HUMAN_JSON=$(jq -R -n '[inputs | select(length>0) | split("\t") | {id: .[0], verb: .[1]}]' /tmp/linear_human_verbs.txt)
+            fi
+
+            FINAL=$(jq -n \
+              --slurpfile cand /tmp/linear_candidates.json \
+              --argjson llm "$LLM_LINEAR" \
+              --argjson human "$HUMAN_JSON" '
+              def allowed: ["Closes","Fixes","Resolves","Completes","Part of","Refs","References","Related to"];
+              [ $cand[0][] | . as $c
+                | ([ $llm[]?   | select(type == "object" and .id == $c.id) ] | .[0]) as $l
+                | ([ $human[]? | select(.id == $c.id) ] | .[0]) as $h
+                | (if ($h.verb? // "") != "" then $h.verb
+                   elif ($l.verb? // "") == "None" and $c.source != "branch" then "DROP"
+                   elif (($l.verb? // "") != "") and ([$l.verb] | inside(allowed)) then $l.verb
+                   else $c.verb end) as $verb
+                | select($verb != "DROP")
+                | {id: $c.id, verb: $verb, title: ($c.title? // "")} ]')
+
+            if [ "$(printf '%s' "$FINAL" | jq 'length')" != "0" ]; then
+              SECTION=$(printf '%s' "$FINAL" | jq -r '.[] | "\(.verb) \(.id)\(if .title != "" then " — \(.title)" else "" end)"')
+              MARKER=$(printf '%s' "$FINAL" | jq -r '[.[] | "\(.id)=\(.verb)"] | join(";")')
+              BODY="## Linear
+          <!-- linear-managed: ${MARKER} -->
+
+          ${SECTION}
+
+          ${BODY}"
+            fi
           fi
 
           # Append attribution
@@ -329,6 +553,13 @@ jobs:
 
           ---
           *PR description generated by [Agent](https://weekendsuperhero.io)*"
+
+          # No-op guard: if nothing changed, skip the write — an `edited`
+          # retrigger of this workflow then converges instead of looping.
+          if [ "$TITLE" = "$CURRENT_TITLE" ] && [ "$BODY" = "$CURRENT_BODY" ]; then
+            echo "Generated title/body identical to current PR — skipping update"
+            exit 0
+          fi
 
           gh pr edit "$PR_NUMBER" --title "$TITLE" --body "$BODY"
           echo "PR #${PR_NUMBER} updated successfully"
