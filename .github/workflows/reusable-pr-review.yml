@@ -1,0 +1,750 @@
+# Reusable workflow: label-gated PR review loop with three Jules agents
+# (code review · security · test coverage).
+#
+# Usage in a consuming repo:
+#
+# ```yaml
+# name: PR Review (Jules)
+# on:
+#   pull_request:
+#     types: [labeled, synchronize]
+#
+# jobs:
+#   review:
+#     # Exact-match guard: outcome/state labels we add ourselves (jules:reviewing,
+#     # review:approved, …) must NOT re-enter the concurrency group below.
+#     if: >-
+#       github.event.action == 'synchronize'
+#       || github.event.label.name == 'jules:review'
+#       || github.event.label.name == 'jules:force'
+#     # Job-level (not workflow-level) so skipped runs never claim the group.
+#     # A new `jules:review` press or a push cancels a stale in-flight round.
+#     concurrency:
+#       group: pr-review-${{ github.event.pull_request.number }}
+#       cancel-in-progress: true
+#     permissions:
+#       contents: read
+#       issues: write
+#       pull-requests: write
+#     uses: <owner>/<repo>/.github/workflows/reusable-pr-review.yml@main
+#     with:
+#       runs-on: warp-ubuntu-latest-x64-4x
+#       review-guidelines: "RULES.md"
+#       security-guidelines: "CREDENTIALS.md,acp-fs/SANDBOXING.md"
+#     secrets: inherit
+# ```
+#
+# The loop:
+#   1. Adding the `jules:review` label is the button. The workflow removes it
+#      immediately (re-arming it) and runs one round: all agents in parallel,
+#      one Jules session each.
+#   2. Each agent maintains exactly ONE sticky comment on the PR (edited in
+#      place, never appended), with a hidden marker recording the reviewed SHA,
+#      round number, and the open findings as machine-readable state.
+#   3. Outcome labels carry the verdicts (`review:approved|needs-changes`,
+#      `security:clear|flagged`, `tests:sufficient|needs-work`, plus
+#      `jules:approved` when everything is positive).
+#   4. New commits (`synchronize`) strip the now-stale outcome labels and
+#      cancel any in-flight round. Re-adding `jules:review` runs a DELTA
+#      round: agents re-verify each previous finding (resolved/unresolved)
+#      and review only the changes since the last reviewed SHA — no wasted
+#      turns re-litigating settled findings.
+#   5. Same-SHA presses are no-ops unless the `jules:force` label is used.
+#
+# Verdict → labels is derived deterministically from the OPEN findings
+# (critical/high ⇒ fail, medium ⇒ warn, else the model's own verdict), so a
+# model that under-reports severity can't green-light its own findings.
+
+name: Reusable PR Review
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label for all jobs (e.g. warp-ubuntu-latest-x64-4x)"
+        type: string
+        required: false
+        default: "ubuntu-latest"
+      agents:
+        description: "Comma-separated agents to run: any of review,security,tests"
+        type: string
+        required: false
+        default: "review,security,tests"
+      trigger-label:
+        description: "Label that starts a review round (removed on pickup so it re-arms)"
+        type: string
+        required: false
+        default: "jules:review"
+      force-label:
+        description: "Label that starts a round even when the head SHA was already reviewed"
+        type: string
+        required: false
+        default: "jules:force"
+      review-guidelines:
+        description: "Comma-separated repo paths appended to the code-review agent's prompt (e.g. RULES.md)"
+        type: string
+        required: false
+        default: ""
+      security-guidelines:
+        description: "Comma-separated repo paths appended to the security agent's prompt"
+        type: string
+        required: false
+        default: ""
+      tests-guidelines:
+        description: "Comma-separated repo paths appended to the test-coverage agent's prompt"
+        type: string
+        required: false
+        default: ""
+      diff-file-patterns:
+        description: "Space-separated glob patterns for files to include in the diff"
+        type: string
+        required: false
+        default: "'*.rs' '*.ts' '*.tsx' '*.toml' '*.sql' '*.yml' '*.sh' '*.css' '*.go' '*.swift'"
+      diff-exclude-patterns:
+        description: "Space-separated patterns to exclude from the diff"
+        type: string
+        required: false
+        default: ":!pnpm-lock.yaml :!Cargo.lock ':!**/bindings/*.ts'"
+      max-commit-messages:
+        description: "Maximum number of commit messages to include"
+        type: number
+        required: false
+        default: 30
+      max-findings:
+        description: "Cap on NEW findings per agent per round"
+        type: number
+        required: false
+        default: 12
+      max-wait-seconds:
+        description: "Maximum seconds to wait for each Jules session"
+        type: number
+        required: false
+        default: 600
+    secrets:
+      JULES_API_KEY:
+        required: true
+      JULES_PR_CLIENT_ID:
+        required: false
+      JULES_PR_PRIVATE_KEY:
+        required: false
+
+jobs:
+  # ── New commits invalidate the last round: strip stale outcome labels. ──
+  # (The caller's concurrency group has already cancelled any in-flight
+  # round for this PR.) Sticky comments stay — they self-update next round.
+  cleanup:
+    name: Clear stale review labels
+    if: github.event.action == 'synchronize'
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Remove outcome labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          for label in "jules:reviewing" "jules:approved" "jules:error" \
+                       "review:approved" "review:needs-changes" \
+                       "security:clear" "security:flagged" \
+                       "tests:sufficient" "tests:needs-work"; do
+            gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label "$label" 2>/dev/null || true
+          done
+          echo "Stale review labels cleared for PR #$PR (new commits)"
+
+  # ── Gate + shared context. Runs once per round; agents fan out from it. ──
+  prepare:
+    name: Prepare review round
+    if: >-
+      github.event.action == 'labeled'
+      && (github.event.label.name == inputs.trigger-label
+          || github.event.label.name == inputs.force-label)
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    outputs:
+      skip: ${{ steps.state.outputs.skip }}
+      agents: ${{ steps.state.outputs.agents }}
+      round: ${{ steps.state.outputs.round }}
+    steps:
+      - name: Validate GitHub App secret configuration
+        id: app-auth-config
+        shell: bash
+        env:
+          JULES_APP_ID: ${{ secrets.JULES_PR_CLIENT_ID }}
+          JULES_APP_KEY: ${{ secrets.JULES_PR_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if { [ -n "${JULES_APP_ID}" ] && [ -z "${JULES_APP_KEY}" ]; } || { [ -z "${JULES_APP_ID}" ] && [ -n "${JULES_APP_KEY}" ]; }; then
+            echo "::error::Set both JULES_PR_CLIENT_ID and JULES_PR_PRIVATE_KEY, or neither."
+            exit 1
+          fi
+          ENABLED=false
+          if [ -n "${JULES_APP_ID}" ] && [ -n "${JULES_APP_KEY}" ]; then
+            ENABLED=true
+          fi
+          echo "enabled=${ENABLED}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate GitHub App token
+        if: steps.app-auth-config.outputs.enabled == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.JULES_PR_CLIENT_ID }}
+          private-key: ${{ secrets.JULES_PR_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      # Remove the pressed label FIRST so the button re-arms even when this
+      # round later skips or fails, then make sure the whole taxonomy exists
+      # (idempotent — `--force` updates color/description in place).
+      - name: Re-arm trigger and bootstrap labels
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          PRESSED: ${{ github.event.label.name }}
+        run: |
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label "$PRESSED" 2>/dev/null || true
+
+          create() { gh label create "$1" --repo "$GITHUB_REPOSITORY" --color "$2" --description "$3" --force >/dev/null 2>&1 || true; }
+          create "jules:review"          "ededed" "Request a Jules review round (re-add to re-run)"
+          create "jules:force"           "ededed" "Force a Jules round even if this SHA was already reviewed"
+          create "jules:reviewing"       "fbca04" "Jules review round in progress"
+          create "jules:approved"        "0e8a16" "All Jules agents positive"
+          create "jules:error"           "b60205" "A Jules agent failed — see workflow run"
+          create "review:approved"       "0e8a16" "Jules code review: no blocking findings"
+          create "review:needs-changes"  "d93f0b" "Jules code review: blocking findings open"
+          create "security:clear"        "0e8a16" "Jules security review: no blocking findings"
+          create "security:flagged"      "b60205" "Jules security review: blocking findings open"
+          create "tests:sufficient"      "0e8a16" "Jules test review: coverage adequate for this diff"
+          create "tests:needs-work"      "d93f0b" "Jules test review: missing tests for this diff"
+          echo "Trigger re-armed; label taxonomy ensured"
+
+      - name: Checkout PR head
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          token: ${{ steps.app-token.outputs.token || github.token }}
+          fetch-depth: 0
+
+      # Each agent's sticky comment carries `<!-- jules:<agent> sha:… round:N -->`
+      # plus a base64 state block of its open findings. Read them to decide
+      # same-SHA skip and to seed the delta round.
+      - name: Read previous round state
+        id: state
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          AGENTS: ${{ inputs.agents }}
+          FORCED: ${{ github.event.label.name == inputs.force-label }}
+        run: |
+          set -euo pipefail
+          mkdir -p context
+
+          # Validate + normalize the agent list.
+          AGENTS_JSON=$(printf '%s' "$AGENTS" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+          for a in $(printf '%s' "$AGENTS_JSON" | jq -r '.[]'); do
+            case "$a" in review|security|tests) ;; *)
+              echo "::error::Unknown agent '$a' (allowed: review, security, tests)"; exit 1 ;;
+            esac
+          done
+          echo "agents=$(printf '%s' "$AGENTS_JSON" | jq -c .)" >> "$GITHUB_OUTPUT"
+
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate --jq '.[]' | jq -s '.' > /tmp/all_comments.json
+
+          ALL_CURRENT=true
+          MAX_ROUND=0
+          LAST_SHA=""
+          for a in $(printf '%s' "$AGENTS_JSON" | jq -r '.[]'); do
+            BODY=$(jq -r --arg m "<!-- jules:${a} sha:" '[.[] | select(.body | contains($m))] | last | .body // empty' /tmp/all_comments.json)
+            SHA=$(printf '%s' "$BODY" | grep -oE "<!-- jules:${a} sha:[0-9a-f]+" | grep -oE '[0-9a-f]{7,}' | head -1 || true)
+            ROUND=$(printf '%s' "$BODY" | grep -oE "round:[0-9]+" | head -1 | cut -d: -f2 || true)
+            STATE=$(printf '%s' "$BODY" | grep -oE "<!-- jules:${a}:state [A-Za-z0-9+/=]+" | awk '{print $3}' || true)
+
+            if [ -n "$STATE" ] && printf '%s' "$STATE" | base64 -d 2>/dev/null | jq -e 'type == "array"' > /dev/null 2>&1; then
+              printf '%s' "$STATE" | base64 -d > "context/prev_${a}.json"
+            else
+              echo '[]' > "context/prev_${a}.json"
+            fi
+
+            [ "$SHA" = "$HEAD_SHA" ] || ALL_CURRENT=false
+            [ -n "$SHA" ] && LAST_SHA="$SHA"
+            [ -n "${ROUND:-}" ] && [ "$ROUND" -gt "$MAX_ROUND" ] && MAX_ROUND=$ROUND
+            echo "  $a: last sha=${SHA:-none} round=${ROUND:-0} open=$(jq 'length' "context/prev_${a}.json")"
+          done
+
+          if [ "$ALL_CURRENT" = "true" ] && [ "$FORCED" != "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Head $HEAD_SHA already reviewed by every requested agent — no-op. Add the force label to re-run."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "round=$((MAX_ROUND + 1))" >> "$GITHUB_OUTPUT"
+          echo "last_sha=$LAST_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Mark round in progress
+        if: steps.state.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "jules:reviewing"
+
+      - name: Gather shared context
+        if: steps.state.outputs.skip != 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          LAST_SHA: ${{ steps.state.outputs.last_sha }}
+          ROUND: ${{ steps.state.outputs.round }}
+          PATTERNS: ${{ inputs.diff-file-patterns }}
+          EXCLUDES: ${{ inputs.diff-exclude-patterns }}
+          MAX_COMMITS: ${{ inputs.max-commit-messages }}
+          REVIEW_GUIDELINES: ${{ inputs.review-guidelines }}
+          SECURITY_GUIDELINES: ${{ inputs.security-guidelines }}
+          TESTS_GUIDELINES: ${{ inputs.tests-guidelines }}
+        run: |
+          set -euo pipefail
+
+          git log -n "$MAX_COMMITS" \
+            --format="commit %h%n%B%n=== END OF COMMIT ===%n" \
+            "${BASE_SHA}"..HEAD > context/commits.txt
+
+          git diff --name-status "${BASE_SHA}"...HEAD > context/files.txt
+
+          # Same include/exclude + per-file-collapse strategy as the
+          # PR-description workflow: full context for normal files, one huge
+          # generated file can't crowd out the rest.
+          PATTERNS_CLEAN=${PATTERNS//\'/}
+          EXCLUDES_CLEAN=${EXCLUDES//\'/}
+          # shellcheck disable=SC2206
+          PATTERNS_ARRAY=($PATTERNS_CLEAN)
+          # shellcheck disable=SC2206
+          EXCLUDES_ARRAY=($EXCLUDES_CLEAN)
+          DEFAULT_EXCLUDES=(
+            ':(exclude)*.lock'
+            ':(exclude)*package-lock.json'
+            ':(exclude)*pnpm-lock.yaml'
+            ':(exclude)*.min.js'
+            ':(exclude)*.min.css'
+            ':(exclude)*.map'
+            ':(exclude)*.snap'
+            ':(exclude)*__snapshots__*'
+          )
+
+          MAX_FILE_DIFF_BYTES=60000
+          : > context/diff.txt
+          git -c core.quotePath=false diff --name-only "${BASE_SHA}"...HEAD -- \
+            "${PATTERNS_ARRAY[@]}" "${EXCLUDES_ARRAY[@]}" "${DEFAULT_EXCLUDES[@]}" \
+            > /tmp/changed_files.txt
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            git -c core.quotePath=false diff -U3 "${BASE_SHA}"...HEAD -- "$f" > /tmp/file_diff.txt
+            fbytes=$(wc -c < /tmp/file_diff.txt)
+            if [ "$fbytes" -gt "$MAX_FILE_DIFF_BYTES" ]; then
+              stat_line=$(git diff --stat "${BASE_SHA}"...HEAD -- "$f" | sed -n '1p')
+              printf '%s\n... [diff for this file collapsed: %s bytes; see stat] ...\n\n' \
+                "$stat_line" "$fbytes" >> context/diff.txt
+            else
+              cat /tmp/file_diff.txt >> context/diff.txt
+            fi
+          done < /tmp/changed_files.txt
+
+          # Delta diff for follow-up rounds (falls back to full when the last
+          # reviewed SHA is gone, e.g. after a force-push).
+          DELTA=false
+          if [ -n "$LAST_SHA" ] && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
+            git -c core.quotePath=false diff -U3 "${LAST_SHA}"...HEAD -- \
+              "${PATTERNS_ARRAY[@]}" "${EXCLUDES_ARRAY[@]}" "${DEFAULT_EXCLUDES[@]}" \
+              | head -c 200000 > context/delta_diff.txt
+            DELTA=true
+          else
+            : > context/delta_diff.txt
+          fi
+
+          # Human discussion (agents see pushback/decisions); our own sticky
+          # comments are excluded.
+          jq -r '[.[] | select(.body | contains("<!-- jules:") | not)] | .[-15:] | .[] |
+                 "@\(.user.login) (\(.created_at)):\n\(.body[0:1500])\n---"' \
+            /tmp/all_comments.json > context/comments.txt || : > context/comments.txt
+
+          # Per-agent guidelines: concatenate the caller-listed repo files.
+          write_guidelines() {
+            local out="$1" list="$2" budget=30000
+            : > "$out"
+            [ -z "$list" ] && return 0
+            IFS=',' read -ra paths <<< "$list"
+            for p in "${paths[@]}"; do
+              p=$(printf '%s' "$p" | sed -E 's/^ +| +$//g')
+              [ -f "$p" ] || { echo "::warning::Guidelines file not found: $p"; continue; }
+              {
+                printf '\n===== %s =====\n' "$p"
+                head -c "$budget" "$p"
+              } >> "$out"
+            done
+          }
+          write_guidelines context/guidelines_review.md   "$REVIEW_GUIDELINES"
+          write_guidelines context/guidelines_security.md "$SECURITY_GUIDELINES"
+          write_guidelines context/guidelines_tests.md    "$TESTS_GUIDELINES"
+
+          jq -n --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg last "$LAST_SHA" \
+                --argjson round "$ROUND" --argjson delta "$DELTA" \
+                '{head_sha: $head, base_sha: $base, last_sha: $last, round: $round, delta: $delta}' \
+            > context/meta.json
+
+          echo "Context ready: diff $(wc -c < context/diff.txt)B, delta $(wc -c < context/delta_diff.txt)B, round $ROUND"
+
+      - name: Upload context artifact
+        if: steps.state.outputs.skip != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-review-context
+          path: context/
+          retention-days: 1
+          if-no-files-found: error
+
+  # ── One Jules session per agent, in parallel. ──────────────────────────
+  agent:
+    name: Jules ${{ matrix.agent }}
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      issues: write
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        agent: ${{ fromJSON(needs.prepare.outputs.agents) }}
+    steps:
+      - name: Download context
+        uses: actions/download-artifact@v8
+        with:
+          name: pr-review-context
+          path: context/
+
+      - name: Build prompt
+        env:
+          AGENT: ${{ matrix.agent }}
+          MAX_FINDINGS: ${{ inputs.max-findings }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          ROUND=$(jq -r '.round' context/meta.json)
+          DELTA=$(jq -r '.delta' context/meta.json)
+          LAST_SHA=$(jq -r '.last_sha' context/meta.json)
+          PREV_COUNT=$(jq 'length' "context/prev_${AGENT}.json")
+
+          case "$AGENT" in
+            review)
+              PREFIX="REV"
+              cat > /tmp/lens.txt << 'LENS_END'
+          Your lens: GENERAL CODE REVIEW.
+          Hunt for: logic errors and unhandled edge cases; error-handling gaps
+          (swallowed errors, unwraps/panics on fallible paths); concurrency and
+          race hazards; API misuse; breaking changes to public contracts;
+          duplicated code that should reuse an existing helper; violations of
+          the project guidelines included below.
+          Ignore: formatting/style, naming taste, and hypothetical refactors
+          with no concrete defect.
+          LENS_END
+              ;;
+            security)
+              PREFIX="SEC"
+              cat > /tmp/lens.txt << 'LENS_END'
+          Your lens: SECURITY.
+          Hunt for: injection (command, SQL, path traversal); secrets or tokens
+          hardcoded, logged, or written to disk; unsafe deserialization of
+          untrusted input; missing validation at trust boundaries (IPC,
+          network, filesystem, subprocess arguments); sandbox / entitlement /
+          permission expansions; SSRF or unvalidated URLs; crypto misuse;
+          dependency changes that expand the attack surface; PII or sensitive
+          data exposed in logs and error messages.
+          Severity discipline: reachable-by-untrusted-input = critical/high;
+          defense-in-depth hardening = medium/low.
+          LENS_END
+              ;;
+            tests)
+              PREFIX="TST"
+              cat > /tmp/lens.txt << 'LENS_END'
+          Your lens: TEST COVERAGE (of this diff, not the whole repository).
+          Method: (1) enumerate the behavior changes in this diff — new
+          features, changed logic, bug fixes; (2) map each to test changes in
+          the diff or clearly-referenced existing tests; (3) report each gap
+          as a finding naming the exact behavior plus a CONCRETE test to add:
+          suggested test name, scenario, expected result.
+          Severity: bug fix without a regression test = high; new core
+          behavior untested = high/medium; error paths, migrations, and
+          boundary conditions untested = medium; nice-to-have cases = low.
+          Non-behavioral changes (docs, CI, pure refactors with existing
+          coverage) need no tests — say so and pass.
+          LENS_END
+              ;;
+          esac
+
+          cat > /tmp/prompt.txt << CONTRACT_END
+          You are the "${AGENT}" reviewer in an automated three-agent pull
+          request review. Review ONLY this pull request's changes (diff plus
+          its immediate context). Cite file paths and line numbers as they
+          appear in the diff. This is round ${ROUND}.
+
+          Output a single raw JSON object — no markdown fences, no prose:
+          {
+            "verdict": "pass" | "warn" | "fail",
+            "summary": "2-4 plain-language sentences",
+            "findings": [
+              {"id": "${PREFIX}-${ROUND}-1", "severity": "critical|high|medium|low|nit",
+               "file": "path/to/file", "line": 123, "title": "short title",
+               "detail": "why this matters", "suggestion": "concrete fix"}
+            ],
+            "resolved": [
+              {"id": "<id of a PREVIOUS finding>", "status": "resolved" | "unresolved",
+               "note": "one line of evidence"}
+            ]
+          }
+
+          Rules:
+          - "findings" holds NEW issues only, at most ${MAX_FINDINGS}, ordered by
+            severity, ids numbered ${PREFIX}-${ROUND}-1, ${PREFIX}-${ROUND}-2, …
+            Merge duplicates. No praise, no restating the diff, no formatting
+            nits (formatters handle style). An empty array is a fine answer.
+          - If PREVIOUS FINDINGS are provided below: verify EVERY one against
+            the current code and list each in "resolved" with status
+            resolved/unresolved plus evidence. Do NOT repeat unresolved ones in
+            "findings" — they are carried forward automatically. Focus new
+            review effort on the CHANGES SINCE LAST REVIEW section.
+          - "verdict": "fail" if any critical/high finding stands (new or
+            unresolved), "warn" if only medium/low, "pass" when clean or nits.
+          CONTRACT_END
+
+          {
+            echo ""
+            cat /tmp/lens.txt
+            echo ""
+            echo "=== PR TITLE ==="
+            echo "$PR_TITLE"
+
+            if [ -s "context/guidelines_${AGENT}.md" ]; then
+              echo ""
+              echo "=== PROJECT GUIDELINES ==="
+              cat "context/guidelines_${AGENT}.md"
+            fi
+
+            if [ "$PREV_COUNT" -gt 0 ]; then
+              echo ""
+              echo "=== PREVIOUS FINDINGS (round $((ROUND - 1)), still open) ==="
+              jq . "context/prev_${AGENT}.json"
+            fi
+
+            echo ""
+            echo "=== COMMITS ==="
+            cat context/commits.txt
+            echo ""
+            echo "=== FILES CHANGED ==="
+            cat context/files.txt
+
+            if [ -s context/comments.txt ]; then
+              echo ""
+              echo "=== RECENT PR DISCUSSION (humans) ==="
+              cat context/comments.txt
+            fi
+
+            MAX_DIFF_BYTES=600000
+            echo ""
+            if [ "$(wc -c < context/diff.txt)" -gt "$MAX_DIFF_BYTES" ]; then
+              echo "=== FULL DIFF (truncated to ${MAX_DIFF_BYTES} bytes) ==="
+              head -c "$MAX_DIFF_BYTES" context/diff.txt
+            else
+              echo "=== FULL DIFF ==="
+              cat context/diff.txt
+            fi
+
+            if [ "$DELTA" = "true" ] && [ -s context/delta_diff.txt ]; then
+              echo ""
+              echo "=== CHANGES SINCE LAST REVIEW (${LAST_SHA}) ==="
+              cat context/delta_diff.txt
+            fi
+          } >> /tmp/prompt.txt
+
+          echo "Prompt: $(wc -c < /tmp/prompt.txt) bytes"
+
+      - name: Run Jules ${{ matrix.agent }} agent
+        id: jules
+        uses: weekendsuperhero-io/platform-tools/.github/actions/jules-ai@main
+        with:
+          title: "PR Review (${{ matrix.agent }})"
+          jules_api_key: ${{ secrets.JULES_API_KEY }}
+          max_wait_seconds: ${{ inputs.max-wait-seconds }}
+
+      - name: Parse response and update sticky comment
+        env:
+          # github.token (not the app token): comment/label writes with the
+          # default token never trigger other workflows — one less loop class.
+          GH_TOKEN: ${{ github.token }}
+          AGENT: ${{ matrix.agent }}
+          PR: ${{ github.event.pull_request.number }}
+          JULES_OUTPUT: ${{ steps.jules.outputs.response }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(jq -r '.head_sha' context/meta.json)
+          ROUND=$(jq -r '.round' context/meta.json)
+
+          printf '%s' "$JULES_OUTPUT" | sed 's/^```json//;s/^```//;s/```$//' | tr -d '\r' > /tmp/resp.txt
+          if ! jq -e 'type == "object" and (.findings | type == "array")' /tmp/resp.txt > /dev/null 2>&1; then
+            echo "::error::Jules ${AGENT} agent returned unparseable output"
+            head -40 /tmp/resp.txt
+            exit 1
+          fi
+
+          # Carry-forward: previous findings minus the ones the model verified
+          # as resolved, plus this round's new findings (capped).
+          jq -n --slurpfile prev "context/prev_${AGENT}.json" --slurpfile resp /tmp/resp.txt '
+            ($resp[0].resolved // []) as $res
+            | ([ $prev[0][] | . as $p
+                 | select(([ $res[] | select(.id == $p.id and .status == "resolved") ] | length) == 0) ]
+               + ($resp[0].findings // []))
+            | .[0:40]
+          ' > /tmp/open.json
+
+          # Verdict is DERIVED from the open findings (model opinion can only
+          # make it stricter, never greener): crit/high → fail, medium → warn.
+          MODEL_VERDICT=$(jq -r '.verdict // "pass"' /tmp/resp.txt)
+          DERIVED=$(jq -r '
+            [.[] | .severity] as $s
+            | if ($s | any(. == "critical" or . == "high")) then "fail"
+              elif ($s | any(. == "medium")) then "warn"
+              else "pass" end' /tmp/open.json)
+          VERDICT="$DERIVED"
+          if [ "$DERIVED" = "pass" ] && [ "$MODEL_VERDICT" = "warn" ]; then VERDICT="warn"; fi
+          if [ "$MODEL_VERDICT" = "fail" ]; then VERDICT="fail"; fi
+
+          case "$AGENT" in
+            review)   DISPLAY="Code Review" ;;
+            security) DISPLAY="Security" ;;
+            tests)    DISPLAY="Test Coverage" ;;
+          esac
+          case "$VERDICT" in
+            pass) BADGE="✅ pass" ;;
+            warn) BADGE="⚠️ warn" ;;
+            fail) BADGE="❌ needs changes" ;;
+          esac
+
+          OPEN_COUNT=$(jq 'length' /tmp/open.json)
+          RESOLVED_COUNT=$(jq '[.resolved[]? | select(.status == "resolved")] | length' /tmp/resp.txt)
+          STATE_B64=$(jq -c . /tmp/open.json | base64 | tr -d '\n')
+
+          {
+            echo "### 🤖 Jules — ${DISPLAY} · ${BADGE}"
+            echo "_Round ${ROUND} · reviewed \`${HEAD_SHA:0:7}\` · ${OPEN_COUNT} open · ${RESOLVED_COUNT} resolved this round_"
+            echo ""
+            jq -r '"**Summary:** \(.summary // "(none)")"' /tmp/resp.txt
+            if [ "$OPEN_COUNT" -gt 0 ]; then
+              echo ""
+              echo "#### Open findings"
+              jq -r '
+                def icon: {"critical":"🟥","high":"🔴","medium":"🟠","low":"🟡","nit":"⚪"}[.severity] // "🔵";
+                .[] | "- \(icon) **[\(.id)] \(.title)** — `\(.file)\(if .line != null then ":\(.line)" else "" end)`\n  \(.detail // "")\(if (.suggestion // "") != "" then "\n  _Suggestion:_ \(.suggestion)" else "" end)"
+              ' /tmp/open.json
+            fi
+            if [ "$RESOLVED_COUNT" -gt 0 ]; then
+              echo ""
+              echo "<details><summary>✅ Resolved this round (${RESOLVED_COUNT})</summary>"
+              echo ""
+              jq -r '.resolved[]? | select(.status == "resolved") | "- **\(.id)** — \(.note // "resolved")"' /tmp/resp.txt
+              echo ""
+              echo "</details>"
+            fi
+            echo ""
+            echo "<sub>Re-run: add the \`jules:review\` label · force same-SHA re-run: \`jules:force\`</sub>"
+            echo ""
+            echo "<!-- jules:${AGENT} sha:${HEAD_SHA} round:${ROUND} -->"
+            echo "<!-- jules:${AGENT}:state ${STATE_B64} -->"
+          } > /tmp/body.md
+
+          # One sticky comment per agent: PATCH in place if it exists.
+          CID=$(jq -r --arg m "<!-- jules:${AGENT} sha:" \
+            '[.[] | select(.body | contains($m))] | last | .id // empty' \
+            <(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate --jq '.[]' | jq -s '.'))
+          if [ -n "$CID" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$CID" -F body=@/tmp/body.md > /dev/null
+            echo "Updated sticky comment $CID for $AGENT"
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@/tmp/body.md > /dev/null
+            echo "Created sticky comment for $AGENT"
+          fi
+
+          mkdir -p verdict
+          jq -n --arg agent "$AGENT" --arg verdict "$VERDICT" \
+                --argjson open "$OPEN_COUNT" --argjson resolved "$RESOLVED_COUNT" \
+                '{agent: $agent, verdict: $verdict, open: $open, resolved: $resolved}' \
+            > "verdict/verdict-${AGENT}.json"
+
+      - name: Upload verdict
+        uses: actions/upload-artifact@v7
+        with:
+          name: verdict-${{ matrix.agent }}
+          path: verdict/
+          retention-days: 1
+          if-no-files-found: error
+
+  # ── Map verdicts to labels; flag agent failures. ────────────────────────
+  finalize:
+    name: Apply review outcome
+    needs: [prepare, agent]
+    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true'
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Download verdicts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: verdict-*
+          path: verdicts/
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Set outcome labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          AGENTS_JSON: ${{ needs.prepare.outputs.agents }}
+        run: |
+          set -euo pipefail
+          add()    { gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "$1" 2>/dev/null || true; }
+          remove() { gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label "$1" 2>/dev/null || true; }
+
+          ERROR=false
+          ALL_POSITIVE=true
+          for a in $(printf '%s' "$AGENTS_JSON" | jq -r '.[]'); do
+            case "$a" in
+              review)   POS="review:approved";  NEG="review:needs-changes" ;;
+              security) POS="security:clear";   NEG="security:flagged" ;;
+              tests)    POS="tests:sufficient"; NEG="tests:needs-work" ;;
+              *)        continue ;;
+            esac
+
+            F="verdicts/verdict-${a}.json"
+            if [ ! -f "$F" ]; then
+              echo "::warning::No verdict from the ${a} agent (job failed?)"
+              ERROR=true; ALL_POSITIVE=false
+              remove "$POS"; remove "$NEG"
+              continue
+            fi
+
+            V=$(jq -r '.verdict' "$F")
+            echo "${a}: ${V} ($(jq -r '.open' "$F") open)"
+            if [ "$V" = "fail" ]; then
+              add "$NEG"; remove "$POS"; ALL_POSITIVE=false
+            else
+              add "$POS"; remove "$NEG"
+            fi
+          done
+
+          if [ "$ERROR" = "true" ]; then add "jules:error"; else remove "jules:error"; fi
+          if [ "$ALL_POSITIVE" = "true" ]; then add "jules:approved"; else remove "jules:approved"; fi
+          remove "jules:reviewing"
+          echo "Round complete"
