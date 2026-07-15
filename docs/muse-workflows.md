@@ -247,7 +247,7 @@ wanted (Settings → Repository defaults → Labels).
 | `trigger-label` / `force-label` | `muse:review` / `muse:force` | the buttons |
 | `review-guidelines` / `security-guidelines` / `tests-guidelines` | `""` | comma-separated repo paths per lens |
 | `max-findings` | `12` | cap on new findings per agent per round |
-| `max-wait-seconds` | `600` | per-Jules-session timeout |
+| `max-wait-seconds` | `1200` | per-Jules-session timeout |
 | `diff-file-patterns` / `diff-exclude-patterns` / `max-commit-messages` | — | context shaping, same semantics as the other workflows |
 
 Secrets: `JULES_API_KEY` (required), `JULES_PR_CLIENT_ID` +

@@ -69,7 +69,7 @@ on:
         description: "Maximum seconds to wait for each Jules session"
         type: number
         required: false
-        default: 600
+        default: 1200
     secrets:
       JULES_API_KEY:
         required: true
