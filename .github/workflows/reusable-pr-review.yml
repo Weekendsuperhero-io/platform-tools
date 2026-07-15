@@ -118,6 +118,7 @@ jobs:
     outputs:
       skip: ${{ steps.state.outputs.skip }}
       agents: ${{ steps.state.outputs.agents }}
+      skipped: ${{ steps.state.outputs.skipped }}
       round: ${{ steps.state.outputs.round }}
     steps:
       - name: Validate GitHub App secret configuration
@@ -152,7 +153,10 @@ jobs:
       # (idempotent — `--force` updates color/description in place).
       - name: Re-arm trigger and bootstrap labels
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          # github.token, never the app token: default-token events don't
+          # trigger workflows, so our own label writes can't spawn a newer
+          # (skipped) run that shadows this round in the PR checks view.
+          GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           PRESSED: ${{ github.event.label.name }}
         run: |
@@ -201,14 +205,27 @@ jobs:
               echo "::error::Unknown agent '$a' (allowed: review, security, tests)"; exit 1 ;;
             esac
           done
-          echo "agents=$(printf '%s' "$AGENTS_JSON" | jq -c .)" >> "$GITHUB_OUTPUT"
-
           gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate --jq '.[]' | jq -s '.' > /tmp/all_comments.json
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --paginate --jq '.[].name' > /tmp/pr_labels.txt || : > /tmp/pr_labels.txt
+          has_label() { grep -qxF "$1" /tmp/pr_labels.txt; }
 
-          ALL_CURRENT=true
+          # Per-agent skip: an agent that already reviewed THIS head SHA and
+          # whose positive label still stands doesn't burn another session —
+          # its verdict is read from the labels. Agents that failed (or never
+          # ran) at this SHA DO re-run on a press, so a press doubles as a
+          # re-roll of open verdicts. The force label re-runs everyone, and
+          # removing an agent's positive label by hand forces just that one.
+          RUN_AGENTS='[]'
+          SKIPPED_AGENTS='[]'
           MAX_ROUND=0
           LAST_SHA=""
           for a in $(printf '%s' "$AGENTS_JSON" | jq -r '.[]'); do
+            case "$a" in
+              review)   POS="review:approved" ;;
+              security) POS="security:clear" ;;
+              tests)    POS="tests:sufficient" ;;
+            esac
+
             BODY=$(jq -r --arg m "<!-- muse:${a} sha:" '[.[] | select(.body | contains($m))] | last | .body // empty' /tmp/all_comments.json)
             SHA=$(printf '%s' "$BODY" | grep -oE "<!-- muse:${a} sha:[0-9a-f]+" | grep -oE '[0-9a-f]{7,}' | head -1 || true)
             ROUND=$(printf '%s' "$BODY" | grep -oE "round:[0-9]+" | head -1 | cut -d: -f2 || true)
@@ -220,25 +237,34 @@ jobs:
               echo '[]' > "context/prev_${a}.json"
             fi
 
-            [ "$SHA" = "$HEAD_SHA" ] || ALL_CURRENT=false
             [ -n "$SHA" ] && LAST_SHA="$SHA"
             [ -n "${ROUND:-}" ] && [ "$ROUND" -gt "$MAX_ROUND" ] && MAX_ROUND=$ROUND
-            echo "  $a: last sha=${SHA:-none} round=${ROUND:-0} open=$(jq 'length' "context/prev_${a}.json")"
+
+            if [ "$FORCED" != "true" ] && [ "$SHA" = "$HEAD_SHA" ] && has_label "$POS"; then
+              SKIPPED_AGENTS=$(printf '%s' "$SKIPPED_AGENTS" | jq -c --arg a "$a" '. + [$a]')
+              echo "  $a: already positive at ${SHA:0:7} ($POS stands) — skipping"
+            else
+              RUN_AGENTS=$(printf '%s' "$RUN_AGENTS" | jq -c --arg a "$a" '. + [$a]')
+              echo "  $a: run (last sha=${SHA:-none} round=${ROUND:-0} open=$(jq 'length' "context/prev_${a}.json"))"
+            fi
           done
 
-          if [ "$ALL_CURRENT" = "true" ] && [ "$FORCED" != "true" ]; then
+          if [ "$(printf '%s' "$RUN_AGENTS" | jq 'length')" = "0" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Head $HEAD_SHA already reviewed by every requested agent — no-op. Add the force label to re-run."
+            echo "Every requested agent is already positive at $HEAD_SHA — nothing to run. Use the force label to re-review."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "agents=$(printf '%s' "$RUN_AGENTS" | jq -c .)" >> "$GITHUB_OUTPUT"
+          echo "skipped=$(printf '%s' "$SKIPPED_AGENTS" | jq -c .)" >> "$GITHUB_OUTPUT"
           echo "round=$((MAX_ROUND + 1))" >> "$GITHUB_OUTPUT"
           echo "last_sha=$LAST_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Mark round in progress
         if: steps.state.outputs.skip != 'true'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          # github.token, never the app token — see "Re-arm trigger" above.
+          GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
         run: gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "muse:reviewing"
 
@@ -606,6 +632,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           AGENTS_JSON: ${{ needs.prepare.outputs.agents }}
+          SKIPPED_JSON: ${{ needs.prepare.outputs.skipped }}
         run: |
           set -euo pipefail
           add()    { gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "$1" 2>/dev/null || true; }
@@ -613,6 +640,14 @@ jobs:
 
           ERROR=false
           ALL_POSITIVE=true
+
+          # Agents skipped by prepare were skipped BECAUSE their positive
+          # label stands at this SHA — they count as positive and their
+          # labels are left untouched.
+          for a in $(printf '%s' "${SKIPPED_JSON:-[]}" | jq -r '.[]?'); do
+            echo "${a}: skipped (already positive at this SHA)"
+          done
+
           for a in $(printf '%s' "$AGENTS_JSON" | jq -r '.[]'); do
             case "$a" in
               review)   POS="review:approved";  NEG="review:needs-changes" ;;

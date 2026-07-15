@@ -163,7 +163,13 @@ Both comments in that snippet are **load-bearing** — copy them with the code.
    (everything positive) or `muse:error` (an agent failed).
 5. **New commits** (`synchronize`) strip the stale outcome labels and cancel
    an in-flight round. Re-pressing `muse:review` runs a **delta round**.
-6. **Same-SHA presses are no-ops** — `muse:force` overrides.
+6. **A press re-runs only the agents that need it.** An agent whose sticky
+   marker already covers the head SHA *and* whose positive label still stands
+   is skipped — its verdict is read from the labels, no session spent. Agents
+   that failed (or errored) at this SHA re-run, so a press doubles as a
+   re-roll of open verdicts. All agents positive at the current SHA → the
+   whole press is a no-op. `muse:force` re-runs everyone; removing an agent's
+   positive label by hand forces just that agent.
 
 ### Delta rounds (why turns aren't wasted)
 
@@ -237,6 +243,9 @@ wanted (Settings → Repository defaults → Labels).
   startup failure; merge platform-tools first.
 - Human discussion on the PR (minus the sticky comments) is included in the
   agents' context, so pushback and decisions are visible to the next round.
+- All of the loop's own label writes use `github.token`, whose events never
+  trigger workflows — so mid-round label changes can't spawn a newer
+  (skipped) run that would shadow the live round in the PR checks view.
 
 ### Inputs
 
