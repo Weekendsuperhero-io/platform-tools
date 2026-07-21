@@ -311,6 +311,7 @@ jobs:
           )
 
           MAX_FILE_DIFF_BYTES=60000
+          MAX_DELTA_BYTES=200000
           : > context/diff.txt
           git -c core.quotePath=false diff --name-only "${BASE_SHA}"...HEAD -- \
             "${PATTERNS_ARRAY[@]}" "${EXCLUDES_ARRAY[@]}" "${DEFAULT_EXCLUDES[@]}" \
@@ -320,7 +321,10 @@ jobs:
             git -c core.quotePath=false diff -U3 "${BASE_SHA}"...HEAD -- "$f" > /tmp/file_diff.txt
             fbytes=$(wc -c < /tmp/file_diff.txt)
             if [ "$fbytes" -gt "$MAX_FILE_DIFF_BYTES" ]; then
-              stat_line=$(git diff --stat "${BASE_SHA}"...HEAD -- "$f" | sed -n '1p')
+              # No `git … | sed`: an early-exiting reader can SIGPIPE git,
+              # which pipefail turns into a failed step. Trim in the shell.
+              stat_line=$(git diff --stat "${BASE_SHA}"...HEAD -- "$f")
+              stat_line=${stat_line%%$'\n'*}
               printf '%s\n... [diff for this file collapsed: %s bytes; see stat] ...\n\n' \
                 "$stat_line" "$fbytes" >> context/diff.txt
             else
@@ -332,9 +336,18 @@ jobs:
           # reviewed SHA is gone, e.g. after a force-push).
           DELTA=false
           if [ -n "$LAST_SHA" ] && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
+            # Cap via a file, never `git … | head`: head exits at the cap, git
+            # dies on SIGPIPE, and pipefail fails the step with 141 — exactly
+            # when the delta is big enough to need capping.
             git -c core.quotePath=false diff -U3 "${LAST_SHA}"...HEAD -- \
               "${PATTERNS_ARRAY[@]}" "${EXCLUDES_ARRAY[@]}" "${DEFAULT_EXCLUDES[@]}" \
-              | head -c 200000 > context/delta_diff.txt
+              > /tmp/delta_full.txt
+            head -c "$MAX_DELTA_BYTES" /tmp/delta_full.txt > context/delta_diff.txt
+            dbytes=$(wc -c < /tmp/delta_full.txt)
+            if [ "$dbytes" -gt "$MAX_DELTA_BYTES" ]; then
+              printf '\n... [delta diff truncated at %s of %s bytes; see the full diff] ...\n' \
+                "$MAX_DELTA_BYTES" "$dbytes" >> context/delta_diff.txt
+            fi
             DELTA=true
           else
             : > context/delta_diff.txt

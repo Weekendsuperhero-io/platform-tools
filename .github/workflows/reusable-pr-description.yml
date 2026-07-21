@@ -184,7 +184,7 @@ jobs:
                 "${BASE_REF}"..HEAD > /tmp/commits.txt
               ;;
             oneline|"")
-              git log --oneline "${BASE_REF}"..HEAD | head -n "$MAX_COMMITS" > /tmp/commits.txt
+              git log --oneline -n "$MAX_COMMITS" "${BASE_REF}"..HEAD > /tmp/commits.txt
               ;;
             *)
               echo "::error::Unknown commit-format '${COMMIT_FORMAT}'. Use 'oneline' or 'full'."
@@ -235,7 +235,10 @@ jobs:
             git -c core.quotePath=false diff -U3 "${BASE_REF}"...HEAD -- "$f" > /tmp/file_diff.txt
             fbytes=$(wc -c < /tmp/file_diff.txt)
             if [ "$fbytes" -gt "$MAX_FILE_DIFF_BYTES" ]; then
-              stat_line=$(git diff --stat "${BASE_REF}"...HEAD -- "$f" | sed -n '1p')
+              # No `git … | sed`: an early-exiting reader can SIGPIPE git,
+              # which pipefail turns into a failed step. Trim in the shell.
+              stat_line=$(git diff --stat "${BASE_REF}"...HEAD -- "$f")
+              stat_line=${stat_line%%$'\n'*}
               printf '%s\n... [diff for this file collapsed: %s bytes; see stat] ...\n\n' \
                 "$stat_line" "$fbytes" >> /tmp/diff.txt
             else
