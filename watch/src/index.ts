@@ -12,6 +12,10 @@ export type Ticket = {
   pr: number;
   deadline: number;
   start_run_id: number;
+  /** Defaults to muse-pr-description-ready. */
+  event_type?: string;
+  /** Review agent slot; omitted for PR-description tickets. */
+  agent?: string;
 };
 
 type JulesState = "pending" | "ready" | "failed";
@@ -39,8 +43,9 @@ function timingSafeEqual(a: string, b: string): boolean {
   return out === 0;
 }
 
-function ticketKey(repo: string, pr: number): string {
-  return `pr:${repo}:${pr}`;
+function ticketKey(t: Pick<Ticket, "repo" | "pr" | "agent">): string {
+  if (t.agent) return `pr:${t.repo}:${t.pr}:${t.agent}`;
+  return `pr:${t.repo}:${t.pr}`;
 }
 
 async function julesState(env: Env, sessionId: string): Promise<JulesState> {
@@ -83,12 +88,13 @@ async function dispatch(env: Env, t: Ticket, outcome: string): Promise<void> {
       "user-agent": "muse-watch",
     },
     body: JSON.stringify({
-      event_type: "muse-pr-description-ready",
+      event_type: t.event_type || "muse-pr-description-ready",
       client_payload: {
         session_id: t.session_id,
         pr: t.pr,
         outcome,
         start_run_id: t.start_run_id,
+        agent: t.agent ?? "",
       },
     }),
   });
@@ -133,7 +139,7 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
     return new Response("missing fields", { status: 400 });
   }
 
-  await env.TICKETS.put(ticketKey(t.repo, t.pr), String(t.session_id), {
+  await env.TICKETS.put(ticketKey(t), String(t.session_id), {
     expirationTtl: 60 * 40,
   });
   await env.WATCH.send(t, { delaySeconds: 45 });
@@ -154,9 +160,11 @@ export default {
   async queue(batch: MessageBatch<Ticket>, env: Env): Promise<void> {
     for (const msg of batch.messages) {
       const t = msg.body;
-      console.log(`queue ${t.repo}#${t.pr} session=${t.session_id}`);
+      console.log(
+        `queue ${t.repo}#${t.pr} session=${t.session_id} event=${t.event_type ?? "description"} agent=${t.agent ?? "-"}`,
+      );
       try {
-        const current = await env.TICKETS.get(ticketKey(t.repo, t.pr));
+        const current = await env.TICKETS.get(ticketKey(t));
         if (current && current !== String(t.session_id)) {
           console.log("ack stale (newer session registered)");
           msg.ack();

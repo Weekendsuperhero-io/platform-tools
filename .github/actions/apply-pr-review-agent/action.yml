@@ -1,0 +1,148 @@
+# Parse one Muse review agent's Jules JSON, PATCH its sticky comment,
+# and set that agent's outcome labels.
+
+name: "Apply Muse review agent"
+description: "Sticky comment + per-agent labels from a Jules review response"
+
+inputs:
+  agent:
+    description: "review | security | tests"
+    required: true
+  pr_number:
+    description: "Pull request number"
+    required: true
+  jules_output:
+    description: "Raw Jules agent message"
+    required: true
+  context_dir:
+    description: "Directory with meta.json and prev_<agent>.json"
+    required: false
+    default: "context"
+  gh_token:
+    description: "Token with issues: write and pull-requests: write"
+    required: true
+
+outputs:
+  verdict:
+    description: "pass | warn | fail"
+    value: ${{ steps.apply.outputs.verdict }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Parse, comment, label
+      id: apply
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gh_token }}
+        AGENT: ${{ inputs.agent }}
+        PR: ${{ inputs.pr_number }}
+        JULES_OUTPUT: ${{ inputs.jules_output }}
+        CONTEXT: ${{ inputs.context_dir }}
+      run: |
+        set -euo pipefail
+        HEAD_SHA=$(jq -r '.head_sha' "$CONTEXT/meta.json")
+        ROUND=$(jq -r '.round' "$CONTEXT/meta.json")
+
+        LIVE=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
+        if [ "$LIVE" != "$HEAD_SHA" ]; then
+          echo "PR head moved ($LIVE != $HEAD_SHA) — skipping stale apply"
+          echo "verdict=stale" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        printf '%s' "$JULES_OUTPUT" | sed 's/^```json//;s/^```//;s/```$//' | tr -d '\r' > /tmp/resp.txt
+        if ! jq -e 'type == "object" and (.findings | type == "array")' /tmp/resp.txt > /dev/null 2>&1; then
+          echo "::error::Muse ${AGENT} agent returned unparseable output"
+          head -40 /tmp/resp.txt
+          exit 1
+        fi
+
+        jq -n --slurpfile prev "$CONTEXT/prev_${AGENT}.json" --slurpfile resp /tmp/resp.txt '
+          ($resp[0].resolved // []) as $res
+          | ([ $prev[0][] | . as $p
+               | select(([ $res[] | select(.id == $p.id and .status == "resolved") ] | length) == 0) ]
+             + ($resp[0].findings // []))
+          | .[0:40]
+        ' > /tmp/open.json
+
+        MODEL_VERDICT=$(jq -r '.verdict // "pass"' /tmp/resp.txt)
+        DERIVED=$(jq -r '
+          [.[] | .severity] as $s
+          | if ($s | any(. == "critical" or . == "high")) then "fail"
+            elif ($s | any(. == "medium")) then "warn"
+            else "pass" end' /tmp/open.json)
+        VERDICT="$DERIVED"
+        if [ "$DERIVED" = "pass" ] && [ "$MODEL_VERDICT" = "warn" ]; then VERDICT="warn"; fi
+        if [ "$MODEL_VERDICT" = "fail" ]; then VERDICT="fail"; fi
+
+        case "$AGENT" in
+          review)   DISPLAY="Code Review"; POS="review:approved"; NEG="review:needs-changes" ;;
+          security) DISPLAY="Security"; POS="security:clear"; NEG="security:flagged" ;;
+          tests)    DISPLAY="Test Coverage"; POS="tests:sufficient"; NEG="tests:needs-work" ;;
+          *) echo "::error::Unknown agent $AGENT"; exit 1 ;;
+        esac
+        case "$VERDICT" in
+          pass) BADGE="✅ pass" ;;
+          warn) BADGE="⚠️ warn" ;;
+          fail) BADGE="❌ needs changes" ;;
+        esac
+
+        OPEN_COUNT=$(jq 'length' /tmp/open.json)
+        RESOLVED_COUNT=$(jq '[.resolved[]? | select(.status == "resolved")] | length' /tmp/resp.txt)
+        STATE_B64=$(jq -c . /tmp/open.json | base64 | tr -d '\n')
+
+        {
+          echo "### 🤖 Muse — ${DISPLAY} · ${BADGE}"
+          echo "_Round ${ROUND} · reviewed \`${HEAD_SHA:0:7}\` · ${OPEN_COUNT} open · ${RESOLVED_COUNT} resolved this round_"
+          echo ""
+          jq -r '"**Summary:** \(.summary // "(none)")"' /tmp/resp.txt
+          if [ "$OPEN_COUNT" -gt 0 ]; then
+            echo ""
+            echo "#### Open findings"
+            jq -r '
+              def icon: {"critical":"🟥","high":"🔴","medium":"🟠","low":"🟡","nit":"⚪"}[.severity] // "🔵";
+              .[] | "- \(icon) **[\(.id)] \(.title)** — `\(.file)\(if .line != null then ":\(.line)" else "" end)`\n  \(.detail // "")\(if (.suggestion // "") != "" then "\n  _Suggestion:_ \(.suggestion)" else "" end)"
+            ' /tmp/open.json
+          fi
+          if [ "$RESOLVED_COUNT" -gt 0 ]; then
+            echo ""
+            echo "<details><summary>✅ Resolved this round (${RESOLVED_COUNT})</summary>"
+            echo ""
+            jq -r '.resolved[]? | select(.status == "resolved") | "- **\(.id)** — \(.note // "resolved")"' /tmp/resp.txt
+            echo ""
+            echo "</details>"
+          fi
+          echo ""
+          echo "<sub>Re-run: add the \`muse:review\` label · force same-SHA re-run: \`muse:force\`</sub>"
+          echo ""
+          echo "<!-- muse:${AGENT} sha:${HEAD_SHA} round:${ROUND} -->"
+          echo "<!-- muse:${AGENT}:state ${STATE_B64} -->"
+        } > /tmp/body.md
+
+        CID=$(jq -r --arg m "<!-- muse:${AGENT} sha:" \
+          '[.[] | select(.body | contains($m))] | last | .id // empty' \
+          <(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate --jq '.[]' | jq -s '.'))
+        if [ -n "$CID" ]; then
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$CID" -F body=@/tmp/body.md > /dev/null
+          echo "Updated sticky comment $CID for $AGENT"
+        else
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@/tmp/body.md > /dev/null
+          echo "Created sticky comment for $AGENT"
+        fi
+
+        add()    { gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "$1" 2>/dev/null || true; }
+        remove() { gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label "$1" 2>/dev/null || true; }
+        if [ "$VERDICT" = "fail" ]; then
+          add "$NEG"; remove "$POS"
+        else
+          add "$POS"; remove "$NEG"
+        fi
+
+        mkdir -p verdict
+        jq -n --arg agent "$AGENT" --arg verdict "$VERDICT" \
+              --argjson open "$OPEN_COUNT" --argjson resolved "$RESOLVED_COUNT" \
+              '{agent: $agent, verdict: $verdict, open: $open, resolved: $resolved}' \
+          > "verdict/verdict-${AGENT}.json"
+
+        echo "verdict=${VERDICT}" >> "$GITHUB_OUTPUT"

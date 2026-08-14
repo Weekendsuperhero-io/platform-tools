@@ -70,12 +70,40 @@ on:
         type: number
         required: false
         default: 1200
+      mode:
+        description: "start (labeled/synchronize) or apply (muse-pr-review-ready). Empty infers start."
+        type: string
+        required: false
+        default: ""
+      session-id:
+        type: string
+        required: false
+        default: ""
+      pr-number:
+        type: number
+        required: false
+        default: 0
+      outcome:
+        type: string
+        required: false
+        default: ""
+      start-run-id:
+        type: string
+        required: false
+        default: ""
+      agent:
+        description: "Which agent to apply (review | security | tests)"
+        type: string
+        required: false
+        default: ""
     secrets:
       JULES_API_KEY:
         required: true
       JULES_PR_CLIENT_ID:
         required: false
       JULES_PR_PRIVATE_KEY:
+        required: false
+      MUSE_WATCH_HMAC:
         required: false
 
 jobs:
@@ -84,7 +112,7 @@ jobs:
   # round for this PR.) Sticky comments stay — they self-update next round.
   cleanup:
     name: Clear stale review labels
-    if: github.event.action == 'synchronize'
+    if: inputs.mode != 'apply' && github.event.action == 'synchronize'
     runs-on: ${{ inputs.runs-on }}
     permissions:
       issues: write
@@ -107,7 +135,8 @@ jobs:
   prepare:
     name: Prepare review round
     if: >-
-      github.event.action == 'labeled'
+      inputs.mode != 'apply'
+      && github.event.action == 'labeled'
       && (github.event.label.name == inputs.trigger-label
           || github.event.label.name == inputs.force-label)
     runs-on: ${{ inputs.runs-on }}
@@ -118,9 +147,22 @@ jobs:
     outputs:
       skip: ${{ steps.state.outputs.skip }}
       agents: ${{ steps.state.outputs.agents }}
+      watch_enabled: ${{ steps.watch.outputs.enabled }}
       skipped: ${{ steps.state.outputs.skipped }}
       round: ${{ steps.state.outputs.round }}
     steps:
+      - name: Detect async watch
+        id: watch
+        env:
+          HMAC: ${{ secrets.MUSE_WATCH_HMAC }}
+          URL: ${{ vars.MUSE_WATCH_URL }}
+        run: |
+          if [ -n "$HMAC" ] && [ -n "$URL" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Validate GitHub App secret configuration
         id: app-auth-config
         shell: bash
@@ -281,6 +323,8 @@ jobs:
           REVIEW_GUIDELINES: ${{ inputs.review-guidelines }}
           SECURITY_GUIDELINES: ${{ inputs.security-guidelines }}
           TESTS_GUIDELINES: ${{ inputs.tests-guidelines }}
+          AGENTS_JSON: ${{ steps.state.outputs.agents }}
+          SKIPPED_JSON: ${{ steps.state.outputs.skipped }}
         run: |
           set -euo pipefail
 
@@ -380,7 +424,9 @@ jobs:
 
           jq -n --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg last "$LAST_SHA" \
                 --argjson round "$ROUND" --argjson delta "$DELTA" \
-                '{head_sha: $head, base_sha: $base, last_sha: $last, round: $round, delta: $delta}' \
+                --argjson agents "${AGENTS_JSON:-[]}" \
+                --argjson skipped "${SKIPPED_JSON:-[]}" \
+                '{head_sha: $head, base_sha: $base, last_sha: $last, round: $round, delta: $delta, agents: $agents, skipped: $skipped}' \
             > context/meta.json
 
           echo "Context ready: diff $(wc -c < context/diff.txt)B, delta $(wc -c < context/delta_diff.txt)B, round $ROUND"
@@ -398,7 +444,7 @@ jobs:
   agent:
     name: Muse ${{ matrix.agent }}
     needs: prepare
-    if: needs.prepare.outputs.skip != 'true'
+    if: inputs.mode != 'apply' && needs.prepare.outputs.skip != 'true'
     runs-on: ${{ inputs.runs-on }}
     permissions:
       issues: write
@@ -503,7 +549,49 @@ jobs:
 
           echo "Prompt: $(wc -c < /tmp/prompt.txt) bytes"
 
+      - name: Create Jules session
+        if: needs.prepare.outputs.watch_enabled == 'true'
+        id: create
+        uses: weekendsuperhero-io/platform-tools/.github/actions/jules-create@main
+        with:
+          title: "PR Review (${{ matrix.agent }})"
+          jules_api_key: ${{ secrets.JULES_API_KEY }}
+
+      - name: Register muse-watch ticket
+        if: needs.prepare.outputs.watch_enabled == 'true'
+        env:
+          HMAC: ${{ secrets.MUSE_WATCH_HMAC }}
+          WATCH_URL: ${{ vars.MUSE_WATCH_URL }}
+          SESSION_ID: ${{ steps.create.outputs.session_id }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MAX_WAIT: ${{ inputs.max-wait-seconds }}
+          AGENT: ${{ matrix.agent }}
+        run: |
+          set -euo pipefail
+          HMAC=$(printf '%s' "$HMAC" | tr -d '\r\n')
+          DEADLINE=$(( $(date +%s) + MAX_WAIT ))
+          BODY=$(jq -n \
+            --arg session_id "$SESSION_ID" \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --argjson pr "$PR_NUMBER" \
+            --argjson deadline "$DEADLINE" \
+            --argjson start_run_id "$GITHUB_RUN_ID" \
+            --arg event_type "muse-pr-review-ready" \
+            --arg agent "$AGENT" \
+            '{session_id:$session_id, repo:$repo, pr:$pr, deadline:$deadline, start_run_id:$start_run_id, event_type:$event_type, agent:$agent}')
+          SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$HMAC" | awk '{print $NF}')
+          HTTP=$(curl -sS -o /tmp/watch_res.txt -w '%{http_code}' -X POST "${WATCH_URL%/}/watch" \
+            -H "content-type: application/json" \
+            -H "x-muse-signature: ${SIG}" \
+            -d "$BODY") || true
+          if [ "$HTTP" != "200" ]; then
+            echo "::error::muse-watch POST /watch HTTP ${HTTP}: $(cat /tmp/watch_res.txt)"
+            exit 1
+          fi
+          echo "Registered watch for ${AGENT} session $SESSION_ID"
+
       - name: Run Muse ${{ matrix.agent }} agent
+        if: needs.prepare.outputs.watch_enabled != 'true'
         id: jules
         uses: weekendsuperhero-io/platform-tools/.github/actions/jules-ai@main
         with:
@@ -512,109 +600,17 @@ jobs:
           max_wait_seconds: ${{ inputs.max-wait-seconds }}
 
       - name: Parse response and update sticky comment
-        env:
-          # github.token (not the app token): comment/label writes with the
-          # default token never trigger other workflows — one less loop class.
-          GH_TOKEN: ${{ github.token }}
-          AGENT: ${{ matrix.agent }}
-          PR: ${{ github.event.pull_request.number }}
-          JULES_OUTPUT: ${{ steps.jules.outputs.response }}
-        run: |
-          set -euo pipefail
-          HEAD_SHA=$(jq -r '.head_sha' context/meta.json)
-          ROUND=$(jq -r '.round' context/meta.json)
-
-          printf '%s' "$JULES_OUTPUT" | sed 's/^```json//;s/^```//;s/```$//' | tr -d '\r' > /tmp/resp.txt
-          if ! jq -e 'type == "object" and (.findings | type == "array")' /tmp/resp.txt > /dev/null 2>&1; then
-            echo "::error::Muse ${AGENT} agent returned unparseable output"
-            head -40 /tmp/resp.txt
-            exit 1
-          fi
-
-          # Carry-forward: previous findings minus the ones the model verified
-          # as resolved, plus this round's new findings (capped).
-          jq -n --slurpfile prev "context/prev_${AGENT}.json" --slurpfile resp /tmp/resp.txt '
-            ($resp[0].resolved // []) as $res
-            | ([ $prev[0][] | . as $p
-                 | select(([ $res[] | select(.id == $p.id and .status == "resolved") ] | length) == 0) ]
-               + ($resp[0].findings // []))
-            | .[0:40]
-          ' > /tmp/open.json
-
-          # Verdict is DERIVED from the open findings (model opinion can only
-          # make it stricter, never greener): crit/high → fail, medium → warn.
-          MODEL_VERDICT=$(jq -r '.verdict // "pass"' /tmp/resp.txt)
-          DERIVED=$(jq -r '
-            [.[] | .severity] as $s
-            | if ($s | any(. == "critical" or . == "high")) then "fail"
-              elif ($s | any(. == "medium")) then "warn"
-              else "pass" end' /tmp/open.json)
-          VERDICT="$DERIVED"
-          if [ "$DERIVED" = "pass" ] && [ "$MODEL_VERDICT" = "warn" ]; then VERDICT="warn"; fi
-          if [ "$MODEL_VERDICT" = "fail" ]; then VERDICT="fail"; fi
-
-          case "$AGENT" in
-            review)   DISPLAY="Code Review" ;;
-            security) DISPLAY="Security" ;;
-            tests)    DISPLAY="Test Coverage" ;;
-          esac
-          case "$VERDICT" in
-            pass) BADGE="✅ pass" ;;
-            warn) BADGE="⚠️ warn" ;;
-            fail) BADGE="❌ needs changes" ;;
-          esac
-
-          OPEN_COUNT=$(jq 'length' /tmp/open.json)
-          RESOLVED_COUNT=$(jq '[.resolved[]? | select(.status == "resolved")] | length' /tmp/resp.txt)
-          STATE_B64=$(jq -c . /tmp/open.json | base64 | tr -d '\n')
-
-          {
-            echo "### 🤖 Muse — ${DISPLAY} · ${BADGE}"
-            echo "_Round ${ROUND} · reviewed \`${HEAD_SHA:0:7}\` · ${OPEN_COUNT} open · ${RESOLVED_COUNT} resolved this round_"
-            echo ""
-            jq -r '"**Summary:** \(.summary // "(none)")"' /tmp/resp.txt
-            if [ "$OPEN_COUNT" -gt 0 ]; then
-              echo ""
-              echo "#### Open findings"
-              jq -r '
-                def icon: {"critical":"🟥","high":"🔴","medium":"🟠","low":"🟡","nit":"⚪"}[.severity] // "🔵";
-                .[] | "- \(icon) **[\(.id)] \(.title)** — `\(.file)\(if .line != null then ":\(.line)" else "" end)`\n  \(.detail // "")\(if (.suggestion // "") != "" then "\n  _Suggestion:_ \(.suggestion)" else "" end)"
-              ' /tmp/open.json
-            fi
-            if [ "$RESOLVED_COUNT" -gt 0 ]; then
-              echo ""
-              echo "<details><summary>✅ Resolved this round (${RESOLVED_COUNT})</summary>"
-              echo ""
-              jq -r '.resolved[]? | select(.status == "resolved") | "- **\(.id)** — \(.note // "resolved")"' /tmp/resp.txt
-              echo ""
-              echo "</details>"
-            fi
-            echo ""
-            echo "<sub>Re-run: add the \`muse:review\` label · force same-SHA re-run: \`muse:force\`</sub>"
-            echo ""
-            echo "<!-- muse:${AGENT} sha:${HEAD_SHA} round:${ROUND} -->"
-            echo "<!-- muse:${AGENT}:state ${STATE_B64} -->"
-          } > /tmp/body.md
-
-          # One sticky comment per agent: PATCH in place if it exists.
-          CID=$(jq -r --arg m "<!-- muse:${AGENT} sha:" \
-            '[.[] | select(.body | contains($m))] | last | .id // empty' \
-            <(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate --jq '.[]' | jq -s '.'))
-          if [ -n "$CID" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$CID" -F body=@/tmp/body.md > /dev/null
-            echo "Updated sticky comment $CID for $AGENT"
-          else
-            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@/tmp/body.md > /dev/null
-            echo "Created sticky comment for $AGENT"
-          fi
-
-          mkdir -p verdict
-          jq -n --arg agent "$AGENT" --arg verdict "$VERDICT" \
-                --argjson open "$OPEN_COUNT" --argjson resolved "$RESOLVED_COUNT" \
-                '{agent: $agent, verdict: $verdict, open: $open, resolved: $resolved}' \
-            > "verdict/verdict-${AGENT}.json"
+        if: needs.prepare.outputs.watch_enabled != 'true'
+        uses: weekendsuperhero-io/platform-tools/.github/actions/apply-pr-review-agent@main
+        with:
+          agent: ${{ matrix.agent }}
+          pr_number: ${{ github.event.pull_request.number }}
+          jules_output: ${{ steps.jules.outputs.response }}
+          context_dir: context
+          gh_token: ${{ github.token }}
 
       - name: Upload verdict
+        if: needs.prepare.outputs.watch_enabled != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: verdict-${{ matrix.agent }}
@@ -622,11 +618,156 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  apply:
+    name: Apply Muse ${{ inputs.agent }}
+    if: inputs.mode == 'apply'
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      actions: read
+    steps:
+      - name: Validate watch outcome
+        id: gate
+        env:
+          OUTCOME: ${{ inputs.outcome }}
+          SESSION_ID: ${{ inputs.session-id }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          AGENT: ${{ inputs.agent }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SESSION_ID" ] || [ "$PR_NUMBER" = "0" ] || [ -z "$AGENT" ]; then
+            echo "::error::apply mode requires session-id, pr-number, and agent"
+            exit 1
+          fi
+          case "$OUTCOME" in
+            ready) echo "ready=true" >> "$GITHUB_OUTPUT" ;;
+            failed|timeout)
+              echo "::warning::Jules ${AGENT} session ${SESSION_ID} ${OUTCOME}"
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Unknown muse-watch outcome '${OUTCOME}'"
+              exit 1
+              ;;
+          esac
+
+      - name: Download review context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          START_RUN_ID: ${{ inputs.start-run-id }}
+        run: |
+          set -euo pipefail
+          gh run download "$START_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name pr-review-context \
+            --dir context
+
+      - name: Collect Jules response
+        if: steps.gate.outputs.ready == 'true'
+        id: collect
+        uses: weekendsuperhero-io/platform-tools/.github/actions/jules-collect@main
+        with:
+          session_id: ${{ inputs.session-id }}
+          jules_api_key: ${{ secrets.JULES_API_KEY }}
+
+      - name: Require a ready session
+        if: steps.gate.outputs.ready == 'true' && steps.collect.outputs.status != 'ready'
+        run: |
+          echo "::error::Jules session ${{ inputs.session-id }} was ${{ steps.collect.outputs.status }} at apply time"
+          exit 1
+
+      - name: Parse response and update sticky comment
+        if: steps.gate.outputs.ready == 'true'
+        uses: weekendsuperhero-io/platform-tools/.github/actions/apply-pr-review-agent@main
+        with:
+          agent: ${{ inputs.agent }}
+          pr_number: ${{ inputs.pr-number }}
+          jules_output: ${{ steps.collect.outputs.response }}
+          context_dir: context
+          gh_token: ${{ github.token }}
+
+      - name: Mark this agent failed
+        if: steps.gate.outputs.ready != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr-number }}
+          AGENT: ${{ inputs.agent }}
+        run: |
+          set -euo pipefail
+          case "$AGENT" in
+            review)   NEG="review:needs-changes"; POS="review:approved" ;;
+            security) NEG="security:flagged"; POS="security:clear" ;;
+            tests)    NEG="tests:needs-work"; POS="tests:sufficient" ;;
+          esac
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "$NEG" 2>/dev/null || true
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label "$POS" 2>/dev/null || true
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "muse:error" 2>/dev/null || true
+
+      - name: Roll up labels if the round is complete
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr-number }}
+        run: |
+          set -euo pipefail
+          AGENTS=$(jq -c '.agents // []' context/meta.json)
+          SKIPPED=$(jq -c '.skipped // []' context/meta.json)
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --paginate --jq '.[].name' > /tmp/pr_labels.txt || : > /tmp/pr_labels.txt
+          has() { grep -qxF "$1" /tmp/pr_labels.txt; }
+
+          ERROR=false
+          ALL_POSITIVE=true
+          PENDING=false
+
+          for a in $(printf '%s' "$SKIPPED" | jq -r '.[]?'); do
+            echo "${a}: skipped (already positive)"
+          done
+
+          for a in $(printf '%s' "$AGENTS" | jq -r '.[]'); do
+            case "$a" in
+              review)   POS="review:approved";  NEG="review:needs-changes" ;;
+              security) POS="security:clear";   NEG="security:flagged" ;;
+              tests)    POS="tests:sufficient"; NEG="tests:needs-work" ;;
+              *)        continue ;;
+            esac
+            if has "$NEG"; then
+              echo "${a}: fail"
+              ALL_POSITIVE=false
+            elif has "$POS"; then
+              echo "${a}: pass"
+            else
+              echo "${a}: still pending"
+              PENDING=true
+            fi
+          done
+
+          if [ "$PENDING" = "true" ]; then
+            echo "Round still in progress"
+            exit 0
+          fi
+
+          add()    { gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "$1" 2>/dev/null || true; }
+          remove() { gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label "$1" 2>/dev/null || true; }
+          if [ "$ERROR" = "true" ]; then add "muse:error"; else remove "muse:error"; fi
+          if [ "$ALL_POSITIVE" = "true" ]; then add "muse:approved"; else remove "muse:approved"; fi
+          remove "muse:reviewing"
+          echo "Round complete"
+
+      - name: Fail on Jules error
+        if: steps.gate.outputs.ready != 'true'
+        run: exit 1
+
   # ── Map verdicts to labels; flag agent failures. ────────────────────────
   finalize:
     name: Apply review outcome
     needs: [prepare, agent]
-    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true'
+    if: >-
+      always()
+      && inputs.mode != 'apply'
+      && needs.prepare.result == 'success'
+      && needs.prepare.outputs.skip != 'true'
+      && needs.prepare.outputs.watch_enabled != 'true'
     runs-on: ${{ inputs.runs-on }}
     permissions:
       issues: write

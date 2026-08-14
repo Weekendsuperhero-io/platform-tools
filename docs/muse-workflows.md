@@ -152,35 +152,55 @@ name: PR Review (Muse)
 on:
   pull_request:
     types: [labeled, synchronize]
+  repository_dispatch:
+    types: [muse-pr-review-ready]
 
 jobs:
   review:
     # Exact-match guard — NOT startsWith('muse:'): the loop writes
     # muse:reviewing / outcome labels itself, and those events must not
     # re-enter the concurrency group or they'd cancel the running round.
+    # Dispatch has no pull_request; use client_payload.pr.
     if: >-
-      github.event.action == 'synchronize'
+      github.event_name == 'repository_dispatch'
+      || github.event.action == 'synchronize'
       || github.event.label.name == 'muse:review'
       || github.event.label.name == 'muse:force'
-    # Job-level (not workflow-level) so guard-skipped runs never claim the
-    # group; a new press or a push cancels a stale in-flight round.
+    # Start/synchronize share one group so a new press cancels a stale
+    # in-flight *start*. Each apply uses its own group so three agents
+    # finishing close together do not cancel each other.
     concurrency:
-      group: pr-review-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
+      group: >-
+        pr-review-${{ github.event.pull_request.number || github.event.client_payload.pr }}${{ github.event_name == 'repository_dispatch' && format('-apply-{0}', github.event.client_payload.agent) || '' }}
+      cancel-in-progress: ${{ github.event_name != 'repository_dispatch' }}
     permissions:
       contents: read
       issues: write
       pull-requests: write
+      actions: read
     uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-pr-review.yml@main
     with:
       runs-on: warp-ubuntu-latest-x64-4x
       review-guidelines: "RULES.md"
       security-guidelines: "CREDENTIALS.md,acp-fs/SANDBOXING.md"
       tests-guidelines: "ARCHITECTURE.md"
+      mode: ${{ github.event_name == 'repository_dispatch' && 'apply' || 'start' }}
+      session-id: ${{ github.event.client_payload.session_id || '' }}
+      pr-number: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.pr || 0 }}
+      outcome: ${{ github.event.client_payload.outcome || '' }}
+      start-run-id: ${{ github.event.client_payload.start_run_id || '' }}
+      agent: ${{ github.event.client_payload.agent || '' }}
     secrets: inherit
 ```
 
 Both comments in that snippet are **load-bearing** — copy them with the code.
+The `repository_dispatch` block must be on the **default branch** or apply
+never runs (GitHub returns 204 and no job appears).
+
+When org `MUSE_WATCH_URL` + `MUSE_WATCH_HMAC` are set, start creates three
+Jules sessions and returns; muse-watch dispatches `muse-pr-review-ready`
+per agent. Comments land as each agent finishes. Without those, the old
+in-process poll remains.
 
 ### The loop
 
