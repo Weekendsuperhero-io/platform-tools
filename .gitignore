@@ -18,3 +18,5 @@ Thumbs.db
 
 .idea/
 .vscode/
+
+.wrangler/

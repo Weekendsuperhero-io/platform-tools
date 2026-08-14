@@ -1,0 +1,70 @@
+# One GET of a Jules session's activities. No sleep loop — the caller (or
+# muse-watch) decides whether to come back later.
+
+name: "Jules collect session"
+description: "GETs Jules activities once and reports pending / ready / failed"
+
+inputs:
+  session_id:
+    description: "Jules session id (with or without the sessions/ prefix)"
+    required: true
+  jules_api_key:
+    description: "JULES_API_KEY secret"
+    required: true
+
+outputs:
+  status:
+    description: "pending | ready | failed"
+    value: ${{ steps.collect.outputs.status }}
+  response:
+    description: "Most recent agentMessaged text when status is ready"
+    value: ${{ steps.collect.outputs.response }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Collect Jules activities
+      id: collect
+      shell: bash
+      env:
+        JULES_API_KEY: ${{ inputs.jules_api_key }}
+        SESSION_ID: ${{ inputs.session_id }}
+      run: |
+        set -euo pipefail
+
+        SESSION_ID="${SESSION_ID#sessions/}"
+        API="https://jules.googleapis.com/v1alpha/sessions/${SESSION_ID}/activities?pageSize=30"
+
+        ACTIVITIES=$(curl -sS --max-time 30 -H "x-goog-api-key: $JULES_API_KEY" "$API") || ACTIVITIES=""
+
+        FAILURE=$(printf '%s' "$ACTIVITIES" | jq -r '
+          [(.activities // [])[] | select(.sessionFailed != null) | .sessionFailed]
+          | last // empty
+        ' 2>/dev/null || true)
+        if [ -n "$FAILURE" ]; then
+          echo "::error::Jules session failed: $FAILURE"
+          echo "status=failed" >> "$GITHUB_OUTPUT"
+          echo "response=" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+
+        AGENT_MSG=$(printf '%s' "$ACTIVITIES" | jq -r '
+          [(.activities // [])[]
+            | select(.originator == "agent")
+            | select(.agentMessaged != null)
+            | .agentMessaged.agentMessage
+          ] | last // empty
+        ' 2>/dev/null || true)
+
+        if [ -n "$AGENT_MSG" ]; then
+          echo "status=ready" >> "$GITHUB_OUTPUT"
+          {
+            echo "response<<JULES_EOF"
+            printf '%s\n' "$AGENT_MSG"
+            echo "JULES_EOF"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "status=pending" >> "$GITHUB_OUTPUT"
+        echo "response=" >> "$GITHUB_OUTPUT"

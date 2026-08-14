@@ -12,7 +12,8 @@ point here.
 | `reusable-pr-review.yml` | `muse:review` label | Runs a three-agent review round (code review · security · tests) with sticky comments and outcome labels |
 
 Shared plumbing: the `jules-ai` composite action (prompt file → Jules session →
-polled response), an optional GitHub App identity (`JULES_PR_CLIENT_ID` +
+polled response), `jules-create` / `jules-collect` for the optional async
+watch path, an optional GitHub App identity (`JULES_PR_CLIENT_ID` +
 `JULES_PR_PRIVATE_KEY`; falls back to `github.token`), and the required
 `JULES_API_KEY` secret.
 
@@ -25,17 +26,26 @@ name: Update PR Description
 on:
   pull_request:
     types: [opened, edited]
+  repository_dispatch:
+    types: [muse-pr-description-ready]
 
 jobs:
   update-pr:
     permissions:
       contents: read
       pull-requests: write
+      actions: write
     uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-pr-description.yml@main
     with:
       trigger-phrase: "@agent pr-title"     # gate: must appear in the PR body
       commit-format: full                   # send full commit bodies to the LLM
       runs-on: warp-ubuntu-latest-x64-4x
+      mode: ${{ github.event_name == 'repository_dispatch' && 'apply' || 'start' }}
+      session-id: ${{ github.event.client_payload.session_id || '' }}
+      pr-number: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.pr || 0 }}
+      outcome: ${{ github.event.client_payload.outcome || '' }}
+      start-run-id: ${{ github.event.client_payload.start_run_id || '' }}
+      watch-url: ${{ vars.MUSE_WATCH_URL }}
     secrets: inherit
 ```
 
@@ -71,6 +81,26 @@ Identity is never delegated to the LLM:
 Inputs: `linear-enabled` (default true), `linear-id-pattern`, plus the diff
 shaping knobs (`diff-file-patterns`, `diff-exclude-patterns`,
 `max-commit-messages`, `commit-format`, `custom-prompt`, `base-branch`).
+
+### Async watch (optional)
+
+By default the start job still polls Jules on the runner (`jules-ai`). To park
+the runner after session create:
+
+1. Deploy [`watch/`](../watch/README.md) (Cloudflare Worker + one queue).
+2. Create **one** org-owned fine-grained PAT (`Weekendsuperhero-io`, all
+   repositories, Actions: read/write only) and store it as the Worker secret
+   `GITHUB_DISPATCH_TOKEN`. Do not make a token per consumer.
+3. Set **org** variable `MUSE_WATCH_URL` and **org** secret `MUSE_WATCH_HMAC`
+   (same HMAC as the Worker). Keep `JULES_API_KEY` as an org secret so
+   `secrets: inherit` works on every wrapper.
+4. Each consumer still needs the wrapper above (`repository_dispatch` + `mode`
+   / payload inputs). The reusable workflow cannot listen for dispatch itself.
+
+The Worker only stores `{session_id, repo, pr, deadline, start_run_id}`. It
+GETs Jules activities on a 60s queue delay, then dispatches **that consumer
+repo** to run `apply` (one `jules-collect` + Linear render + `gh pr edit`).
+Changelog and PR review stay on the blocking poll.
 
 ---
 

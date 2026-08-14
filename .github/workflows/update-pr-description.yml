@@ -1,17 +1,32 @@
 # Thin shim — delegates to the reusable workflow.
 # See .github/README.md for configuration options.
+#
+# Async watch (optional): set repo variable MUSE_WATCH_URL and secret
+# MUSE_WATCH_HMAC after deploying watch/ (see watch/README.md). Without
+# those, this stays on the blocking jules-ai poll.
 
 name: Update PR Description with Jules
 
 on:
   pull_request:
     types: [opened, edited]
+  repository_dispatch:
+    types: [muse-pr-description-ready]
 
 jobs:
   update-pr:
     permissions:
       contents: read
+      pull-requests: write
+      actions: write
     uses: ./.github/workflows/reusable-pr-description.yml
     with:
       trigger-phrase: "@agent pr-title"
+      mode: ${{ github.event_name == 'repository_dispatch' && 'apply' || 'start' }}
+      session-id: ${{ github.event.client_payload.session_id || '' }}
+      pr-number: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.pr || 0 }}
+      outcome: ${{ github.event.client_payload.outcome || '' }}
+      start-run-id: ${{ github.event.client_payload.start_run_id || '' }}
+      watch-url: ${{ vars.MUSE_WATCH_URL }}
+      actions-ref: ${{ github.sha }}
     secrets: inherit

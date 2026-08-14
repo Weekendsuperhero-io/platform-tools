@@ -2,6 +2,10 @@
 # Linear section (extraction/verbs/markers are the workflow's job, never the
 # LLM's).
 #
+# Optional async path: set watch-url + MUSE_WATCH_HMAC to create the Jules
+# session and return; muse-watch later repository_dispatches mode=apply.
+# Without those, this still polls in-process via jules-ai.
+#
 # Docs — usage snippet, trigger-phrase gating, Linear mechanics, inputs:
 # docs/muse-workflows.md
 
@@ -71,6 +75,46 @@ on:
         type: string
         required: false
         default: "[A-Za-z][A-Za-z0-9]+-[0-9]+"
+      mode:
+        description: "start (build prompt + create session) or apply (collect + edit PR). Empty infers start."
+        type: string
+        required: false
+        default: ""
+      session-id:
+        description: "Jules session id (apply mode)"
+        type: string
+        required: false
+        default: ""
+      pr-number:
+        description: "PR number (apply mode). 0 means use github.event.pull_request.number"
+        type: number
+        required: false
+        default: 0
+      outcome:
+        description: "muse-watch outcome: ready | failed | timeout (apply mode)"
+        type: string
+        required: false
+        default: ""
+      start-run-id:
+        description: "Workflow run id that uploaded the ticket artifact (apply mode)"
+        type: string
+        required: false
+        default: ""
+      watch-url:
+        description: "muse-watch base URL (e.g. https://muse-watch.example.workers.dev). Empty keeps the blocking jules-ai poll."
+        type: string
+        required: false
+        default: ""
+      max-wait-seconds:
+        description: "Deadline for async watch (seconds after session create)"
+        type: number
+        required: false
+        default: 1200
+      actions-ref:
+        description: "Git ref for platform-tools composite actions (match the reusable workflow ref)"
+        type: string
+        required: false
+        default: "main"
     secrets:
       JULES_API_KEY:
         required: true
@@ -81,15 +125,20 @@ on:
       LINEAR_API_KEY:
         description: "Optional Linear API key — enriches ticket IDs with titles and prunes false-positive IDs"
         required: false
+      MUSE_WATCH_HMAC:
+        description: "HMAC secret shared with muse-watch. Required only when watch-url is set."
+        required: false
 
 jobs:
   update-pr:
     name: Update PR Title & Description
+    if: inputs.mode != 'apply'
     runs-on: ${{ inputs.runs-on }}
 
     permissions:
       contents: read
       pull-requests: write
+      actions: write
 
     steps:
       - name: Check trigger phrase
@@ -449,8 +498,75 @@ jobs:
             cat /tmp/diff.txt >> /tmp/prompt.txt
           fi
 
-      - name: Generate PR title and description with Jules
+      - name: Detect async watch
         if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
+        id: watch
+        env:
+          HMAC: ${{ secrets.MUSE_WATCH_HMAC }}
+          URL: ${{ inputs.watch-url }}
+        run: |
+          if [ -n "$HMAC" ] && [ -n "$URL" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create Jules session
+        if: (steps.check.outputs.skip != 'true' || github.event_name != 'pull_request') && steps.watch.outputs.enabled == 'true'
+        id: create
+        uses: weekendsuperhero-io/platform-tools/.github/actions/jules-create@${{ inputs.actions-ref }}
+        with:
+          title: "PR Title and Description"
+          jules_api_key: ${{ secrets.JULES_API_KEY }}
+
+      - name: Register muse-watch ticket
+        if: (steps.check.outputs.skip != 'true' || github.event_name != 'pull_request') && steps.watch.outputs.enabled == 'true'
+        env:
+          HMAC: ${{ secrets.MUSE_WATCH_HMAC }}
+          WATCH_URL: ${{ inputs.watch-url }}
+          SESSION_ID: ${{ steps.create.outputs.session_id }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MAX_WAIT: ${{ inputs.max-wait-seconds }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/ticket
+          if [ -s /tmp/linear_candidates.json ]; then
+            cp /tmp/linear_candidates.json /tmp/ticket/linear_candidates.json
+          else
+            echo '[]' > /tmp/ticket/linear_candidates.json
+          fi
+          if [ -s /tmp/linear_human_verbs.txt ]; then
+            cp /tmp/linear_human_verbs.txt /tmp/ticket/linear_human_verbs.txt
+          else
+            : > /tmp/ticket/linear_human_verbs.txt
+          fi
+
+          DEADLINE=$(( $(date +%s) + MAX_WAIT ))
+          BODY=$(jq -n \
+            --arg session_id "$SESSION_ID" \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --argjson pr "$PR_NUMBER" \
+            --argjson deadline "$DEADLINE" \
+            --argjson start_run_id "$GITHUB_RUN_ID" \
+            '{session_id:$session_id, repo:$repo, pr:$pr, deadline:$deadline, start_run_id:$start_run_id}')
+          SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$HMAC" | awk '{print $NF}')
+          curl -fsS -X POST "${WATCH_URL%/}/watch" \
+            -H "content-type: application/json" \
+            -H "x-muse-signature: ${SIG}" \
+            -d "$BODY"
+          echo "Registered watch for session $SESSION_ID (deadline ${DEADLINE})"
+
+      - name: Upload ticket artifact
+        if: (steps.check.outputs.skip != 'true' || github.event_name != 'pull_request') && steps.watch.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-description-ticket
+          path: /tmp/ticket/
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Generate PR title and description with Jules
+        if: (steps.check.outputs.skip != 'true' || github.event_name != 'pull_request') && steps.watch.outputs.enabled != 'true'
         id: jules
         uses: weekendsuperhero-io/platform-tools/.github/actions/jules-ai@main
         with:
@@ -458,85 +574,107 @@ jobs:
           jules_api_key: ${{ secrets.JULES_API_KEY }}
 
       - name: Update PR
-        if: steps.check.outputs.skip != 'true' || github.event_name != 'pull_request'
+        if: (steps.check.outputs.skip != 'true' || github.event_name != 'pull_request') && steps.watch.outputs.enabled != 'true'
+        uses: weekendsuperhero-io/platform-tools/.github/actions/apply-pr-description@${{ inputs.actions-ref }}
+        with:
+          jules_output: ${{ steps.jules.outputs.response }}
+          pr_number: ${{ github.event.pull_request.number }}
+          gh_token: ${{ steps.app-token.outputs.token || github.token }}
+          linear_candidates_file: /tmp/linear_candidates.json
+          linear_human_verbs_file: /tmp/linear_human_verbs.txt
+
+  apply:
+    name: Apply Jules PR description
+    if: inputs.mode == 'apply'
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+    steps:
+      - name: Validate watch outcome
+        env:
+          OUTCOME: ${{ inputs.outcome }}
+          SESSION_ID: ${{ inputs.session-id }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SESSION_ID" ] || [ "$PR_NUMBER" = "0" ]; then
+            echo "::error::apply mode requires session-id and pr-number"
+            exit 1
+          fi
+          case "$OUTCOME" in
+            ready) ;;
+            failed)
+              echo "::error::Jules session ${SESSION_ID} failed"
+              exit 1
+              ;;
+            timeout)
+              echo "::error::Timed out waiting for Jules session ${SESSION_ID}"
+              exit 1
+              ;;
+            *)
+              echo "::error::Unknown muse-watch outcome '${OUTCOME}'"
+              exit 1
+              ;;
+          esac
+
+      - name: Validate GitHub App secret configuration
+        id: app-auth-config
         shell: bash
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          CURRENT_TITLE: ${{ github.event.pull_request.title }}
-          CURRENT_BODY: ${{ github.event.pull_request.body }}
-          JULES_OUTPUT: ${{ steps.jules.outputs.response }}
+          JULES_APP_ID: ${{ secrets.JULES_PR_CLIENT_ID }}
+          JULES_APP_KEY: ${{ secrets.JULES_PR_PRIVATE_KEY }}
         run: |
-          # Try parsing as JSON first
-          OUTPUT=$(echo "$JULES_OUTPUT" | sed 's/^```json//;s/^```//' | tr -d '\r')
-
-          TITLE=$(echo "$OUTPUT" | jq -r '.title // empty' 2>/dev/null)
-          BODY=$(echo "$OUTPUT" | jq -r '.body // empty' 2>/dev/null)
-          LLM_LINEAR=$(echo "$OUTPUT" | jq -c '.linear // []' 2>/dev/null || echo '[]')
-          [ -z "$LLM_LINEAR" ] && LLM_LINEAR='[]'
-
-          if [ -z "$TITLE" ] || [ -z "$BODY" ]; then
-            echo "Jules output is not JSON — using raw output as description"
-            TITLE="${CURRENT_TITLE}"
-            BODY="$JULES_OUTPUT"
-            LLM_LINEAR='[]'
+          set -euo pipefail
+          if { [ -n "${JULES_APP_ID}" ] && [ -z "${JULES_APP_KEY}" ]; } || { [ -z "${JULES_APP_ID}" ] && [ -n "${JULES_APP_KEY}" ]; }; then
+            echo "::error::Set both JULES_PR_CLIENT_ID and JULES_PR_PRIVATE_KEY, or neither."
+            exit 1
           fi
-
-          # ── Deterministic `## Linear` section ──────────────────────────
-          # The workflow owns the section: LLM verbs are accepted only for
-          # extracted IDs and only from the allowlist; anything the model
-          # dropped comes back with its default verb; human-edited verbs
-          # (detected in the extract step) override everything. A hidden
-          # marker records what we wrote so the next run can tell machine
-          # output from human edits.
-          if [ -s /tmp/linear_candidates.json ] && [ "$(jq 'length' /tmp/linear_candidates.json 2>/dev/null || echo 0)" != "0" ]; then
-            # Strip any Linear/ticket section the model put in the body anyway.
-            BODY=$(printf '%s\n' "$BODY" | awk '/^## Linear/{drop=1; next} /^## /{drop=0} !drop')
-
-            HUMAN_JSON='[]'
-            if [ -s /tmp/linear_human_verbs.txt ]; then
-              HUMAN_JSON=$(jq -R -n '[inputs | select(length>0) | split("\t") | {id: .[0], verb: .[1]}]' /tmp/linear_human_verbs.txt)
-            fi
-
-            FINAL=$(jq -n \
-              --slurpfile cand /tmp/linear_candidates.json \
-              --argjson llm "$LLM_LINEAR" \
-              --argjson human "$HUMAN_JSON" '
-              def allowed: ["Closes","Fixes","Resolves","Completes","Part of","Refs","References","Related to"];
-              [ $cand[0][] | . as $c
-                | ([ $llm[]?   | select(type == "object" and .id == $c.id) ] | .[0]) as $l
-                | ([ $human[]? | select(.id == $c.id) ] | .[0]) as $h
-                | (if ($h.verb? // "") != "" then $h.verb
-                   elif ($l.verb? // "") == "None" and $c.source != "branch" then "DROP"
-                   elif (($l.verb? // "") != "") and ([$l.verb] | inside(allowed)) then $l.verb
-                   else $c.verb end) as $verb
-                | select($verb != "DROP")
-                | {id: $c.id, verb: $verb, title: ($c.title? // "")} ]')
-
-            if [ "$(printf '%s' "$FINAL" | jq 'length')" != "0" ]; then
-              SECTION=$(printf '%s' "$FINAL" | jq -r '.[] | "\(.verb) \(.id)\(if .title != "" then " — \(.title)" else "" end)"')
-              MARKER=$(printf '%s' "$FINAL" | jq -r '[.[] | "\(.id)=\(.verb)"] | join(";")')
-              BODY="## Linear
-          <!-- linear-managed: ${MARKER} -->
-
-          ${SECTION}
-
-          ${BODY}"
-            fi
+          ENABLED=false
+          if [ -n "${JULES_APP_ID}" ] && [ -n "${JULES_APP_KEY}" ]; then
+            ENABLED=true
           fi
+          echo "enabled=${ENABLED}" >> "$GITHUB_OUTPUT"
 
-          # Append attribution
-          BODY="${BODY}
+      - name: Generate GitHub App token
+        if: steps.app-auth-config.outputs.enabled == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.JULES_PR_CLIENT_ID }}
+          private-key: ${{ secrets.JULES_PR_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
 
-          ---
-          *PR description generated by [Agent](https://weekendsuperhero.io)*"
+      - name: Download ticket artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          START_RUN_ID: ${{ inputs.start-run-id }}
+        run: |
+          set -euo pipefail
+          gh run download "$START_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name pr-description-ticket \
+            --dir /tmp/ticket
 
-          # No-op guard: if nothing changed, skip the write — an `edited`
-          # retrigger of this workflow then converges instead of looping.
-          if [ "$TITLE" = "$CURRENT_TITLE" ] && [ "$BODY" = "$CURRENT_BODY" ]; then
-            echo "Generated title/body identical to current PR — skipping update"
-            exit 0
-          fi
+      - name: Collect Jules response
+        id: collect
+        uses: weekendsuperhero-io/platform-tools/.github/actions/jules-collect@${{ inputs.actions-ref }}
+        with:
+          session_id: ${{ inputs.session-id }}
+          jules_api_key: ${{ secrets.JULES_API_KEY }}
 
-          gh pr edit "$PR_NUMBER" --title "$TITLE" --body "$BODY"
-          echo "PR #${PR_NUMBER} updated successfully"
+      - name: Require a ready session
+        if: steps.collect.outputs.status != 'ready'
+        run: |
+          echo "::error::Jules session ${{ inputs.session-id }} was ${{ steps.collect.outputs.status }} at apply time"
+          exit 1
+
+      - name: Update PR
+        uses: weekendsuperhero-io/platform-tools/.github/actions/apply-pr-description@${{ inputs.actions-ref }}
+        with:
+          jules_output: ${{ steps.collect.outputs.response }}
+          pr_number: ${{ inputs.pr-number }}
+          gh_token: ${{ steps.app-token.outputs.token || github.token }}
+          linear_candidates_file: /tmp/ticket/linear_candidates.json
+          linear_human_verbs_file: /tmp/ticket/linear_human_verbs.txt

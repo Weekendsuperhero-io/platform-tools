@@ -1,0 +1,23 @@
+name = "muse-watch"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+# Dashboard secrets (HMAC, Jules key, PAT) survive Git-triggered deploys.
+keep_vars = true
+workers_dev = true
+preview_urls = false
+
+# Replace after: wrangler kv namespace create TICKETS
+[[kv_namespaces]]
+binding = "TICKETS"
+id = "552130b2defb49b8aac16c8b419f2af2"
+
+[[queues.producers]]
+binding = "WATCH"
+queue = "muse-watch"
+
+[[queues.consumers]]
+queue = "muse-watch"
+max_batch_size = 1
+max_batch_timeout = 0
+max_retries = 25

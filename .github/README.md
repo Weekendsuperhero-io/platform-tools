@@ -23,14 +23,24 @@ name: Update PR Description
 on:
   pull_request:
     types: [opened, edited]
+  repository_dispatch:
+    types: [muse-pr-description-ready]
 
 jobs:
   update-pr:
     permissions:
       contents: read
+      pull-requests: write
+      actions: write
     uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-pr-description.yml@main
     with:
       trigger-phrase: "@agent pr-title" # optional — only runs if this phrase is in the PR body
+      mode: ${{ github.event_name == 'repository_dispatch' && 'apply' || 'start' }}
+      session-id: ${{ github.event.client_payload.session_id || '' }}
+      pr-number: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.pr || 0 }}
+      outcome: ${{ github.event.client_payload.outcome || '' }}
+      start-run-id: ${{ github.event.client_payload.start_run_id || '' }}
+      watch-url: ${{ vars.MUSE_WATCH_URL }}
     secrets: inherit
 ```
 
@@ -41,6 +51,7 @@ jobs:
   2. Sends the diff + commit messages to Jules AI
   3. Updates the PR with a structured title and description
 - If the PR body doesn't contain the trigger phrase, the workflow skips
+- **Async watch (optional):** deploy [`watch/`](../watch/README.md), store one org-owned fine-grained PAT (all org repos, Actions: write) on the Worker, and set org variable `MUSE_WATCH_URL` + org secret `MUSE_WATCH_HMAC`. Every consumer that copies the wrapper above then parks the runner after session create; muse-watch `repository_dispatch`es that same repo when Jules is done. Omit the URL/HMAC and the job still polls in-process (the old behaviour). Repos outside the org are not covered by that PAT.
 
 ### 2. Changelog Generator
 
