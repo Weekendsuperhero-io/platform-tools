@@ -99,38 +99,53 @@ async function dispatch(env: Env, t: Ticket, outcome: string): Promise<void> {
   throw err;
 }
 
+async function handleFetch(req: Request, env: Env): Promise<Response> {
+  const url = new URL(req.url);
+  if (req.method === "GET" && url.pathname === "/") {
+    return new Response("muse-watch", { status: 200 });
+  }
+  if (req.method !== "POST" || url.pathname !== "/watch") {
+    return new Response("not found", { status: 404 });
+  }
+
+  const secret = (env.MUSE_WATCH_HMAC ?? "").trim();
+  if (!secret) {
+    return new Response("watch misconfigured: MUSE_WATCH_HMAC", { status: 503 });
+  }
+
+  const body = await req.text();
+  const expected = await hmacHex(secret, body);
+  const got = (req.headers.get("x-muse-signature") ?? "").trim().toLowerCase();
+  if (!timingSafeEqual(expected, got)) {
+    return new Response("unauthorized", { status: 401 });
+  }
+
+  let t: Ticket;
+  try {
+    t = JSON.parse(body) as Ticket;
+  } catch {
+    return new Response("bad json", { status: 400 });
+  }
+  if (!t.session_id || !t.repo || !t.pr || !t.deadline || !t.start_run_id) {
+    return new Response("missing fields", { status: 400 });
+  }
+
+  await env.TICKETS.put(ticketKey(t.repo, t.pr), String(t.session_id), {
+    expirationTtl: 60 * 40,
+  });
+  await env.WATCH.send(t, { delaySeconds: 45 });
+  return new Response("ok");
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
-    const url = new URL(req.url);
-    if (req.method === "GET" && url.pathname === "/") {
-      return new Response("muse-watch", { status: 200 });
-    }
-    if (req.method !== "POST" || url.pathname !== "/watch") {
-      return new Response("not found", { status: 404 });
-    }
-
-    const body = await req.text();
-    const expected = await hmacHex(env.MUSE_WATCH_HMAC, body);
-    const got = (req.headers.get("x-muse-signature") ?? "").toLowerCase();
-    if (!timingSafeEqual(expected, got)) {
-      return new Response("unauthorized", { status: 401 });
-    }
-
-    let t: Ticket;
     try {
-      t = JSON.parse(body) as Ticket;
-    } catch {
-      return new Response("bad json", { status: 400 });
+      return await handleFetch(req, env);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "error";
+      console.log(`fetch failed: ${msg}`);
+      return new Response(msg, { status: 500 });
     }
-    if (!t.session_id || !t.repo || !t.pr || !t.deadline || !t.start_run_id) {
-      return new Response("missing fields", { status: 400 });
-    }
-
-    await env.TICKETS.put(ticketKey(t.repo, t.pr), t.session_id, {
-      expirationTtl: 60 * 40,
-    });
-    await env.WATCH.send(t, { delaySeconds: 45 });
-    return new Response("ok");
   },
 
   async queue(batch: MessageBatch<Ticket>, env: Env): Promise<void> {
