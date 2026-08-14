@@ -77,7 +77,9 @@ Copy the printed `https://muse-watch.<subdomain>.workers.dev` URL (no trailing s
 ### 7. Org GitHub var + secret (`gh`, not the website)
 
 ```bash
-gh variable set MUSE_WATCH_URL --org Weekendsuperhero-io --body "https://muse-watch.<subdomain>.workers.dev"
+# default visibility is private-repos only — public consumers see an empty var
+gh variable set MUSE_WATCH_URL --org Weekendsuperhero-io --visibility all \
+  --body "https://muse-watch.gk8b9qcr52.workers.dev"
 gh secret set MUSE_WATCH_HMAC --org Weekendsuperhero-io --visibility all
 # paste the same HMAC as step 5 when prompted
 ```

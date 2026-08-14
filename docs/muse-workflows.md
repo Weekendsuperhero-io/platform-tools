@@ -91,7 +91,9 @@ the runner after session create:
 2. Create **one** org-owned fine-grained PAT (`Weekendsuperhero-io`, all
    repositories, Actions: read/write only) and store it as the Worker secret
    `GITHUB_DISPATCH_TOKEN`. Do not make a token per consumer.
-3. Set **org** variable `MUSE_WATCH_URL` and **org** secret `MUSE_WATCH_HMAC`
+3. Set **org** variable `MUSE_WATCH_URL` (`gh variable set … --visibility all`
+   — the default is private-repos only, which leaves public consumers like
+   `platform-tools` with an empty URL) and **org** secret `MUSE_WATCH_HMAC`
    (same HMAC as the Worker). Keep `JULES_API_KEY` as an org secret so
    `secrets: inherit` works on every wrapper.
 4. Each consumer still needs the wrapper above (`repository_dispatch` + `mode`

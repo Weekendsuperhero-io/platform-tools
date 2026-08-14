@@ -497,12 +497,16 @@ jobs:
         id: watch
         env:
           HMAC: ${{ secrets.MUSE_WATCH_HMAC }}
-          URL: ${{ inputs.watch-url }}
+          # Caller input wins; otherwise the caller's org/repo var.
+          # secrets: inherit does not pass variables — that is why a wrapper
+          # that only inherited secrets used to see HMAC set and URL empty.
+          URL: ${{ inputs.watch-url || vars.MUSE_WATCH_URL }}
         run: |
           if [ -n "$HMAC" ] && [ -n "$URL" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "watch off (HMAC set=${HMAC:+yes}, URL set=${URL:+yes})" >&2
           fi
 
       - name: Create Jules session
@@ -517,7 +521,7 @@ jobs:
         if: (steps.check.outputs.skip != 'true' || github.event_name != 'pull_request') && steps.watch.outputs.enabled == 'true'
         env:
           HMAC: ${{ secrets.MUSE_WATCH_HMAC }}
-          WATCH_URL: ${{ inputs.watch-url }}
+          WATCH_URL: ${{ inputs.watch-url || vars.MUSE_WATCH_URL }}
           SESSION_ID: ${{ steps.create.outputs.session_id }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           MAX_WAIT: ${{ inputs.max-wait-seconds }}
