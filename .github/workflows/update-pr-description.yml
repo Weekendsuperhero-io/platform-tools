@@ -28,5 +28,4 @@ jobs:
       outcome: ${{ github.event.client_payload.outcome || '' }}
       start-run-id: ${{ github.event.client_payload.start_run_id || '' }}
       watch-url: ${{ vars.MUSE_WATCH_URL }}
-      actions-ref: ${{ github.sha }}
     secrets: inherit

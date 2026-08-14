@@ -110,11 +110,6 @@ on:
         type: number
         required: false
         default: 1200
-      actions-ref:
-        description: "Git ref for platform-tools composite actions (match the reusable workflow ref)"
-        type: string
-        required: false
-        default: "main"
     secrets:
       JULES_API_KEY:
         required: true
@@ -514,7 +509,7 @@ jobs:
       - name: Create Jules session
         if: (steps.check.outputs.skip != 'true' || github.event_name != 'pull_request') && steps.watch.outputs.enabled == 'true'
         id: create
-        uses: weekendsuperhero-io/platform-tools/.github/actions/jules-create@${{ inputs.actions-ref }}
+        uses: weekendsuperhero-io/platform-tools/.github/actions/jules-create@main
         with:
           title: "PR Title and Description"
           jules_api_key: ${{ secrets.JULES_API_KEY }}
@@ -575,7 +570,7 @@ jobs:
 
       - name: Update PR
         if: (steps.check.outputs.skip != 'true' || github.event_name != 'pull_request') && steps.watch.outputs.enabled != 'true'
-        uses: weekendsuperhero-io/platform-tools/.github/actions/apply-pr-description@${{ inputs.actions-ref }}
+        uses: weekendsuperhero-io/platform-tools/.github/actions/apply-pr-description@main
         with:
           jules_output: ${{ steps.jules.outputs.response }}
           pr_number: ${{ github.event.pull_request.number }}
@@ -659,7 +654,7 @@ jobs:
 
       - name: Collect Jules response
         id: collect
-        uses: weekendsuperhero-io/platform-tools/.github/actions/jules-collect@${{ inputs.actions-ref }}
+        uses: weekendsuperhero-io/platform-tools/.github/actions/jules-collect@main
         with:
           session_id: ${{ inputs.session-id }}
           jules_api_key: ${{ secrets.JULES_API_KEY }}
@@ -671,7 +666,7 @@ jobs:
           exit 1
 
       - name: Update PR
-        uses: weekendsuperhero-io/platform-tools/.github/actions/apply-pr-description@${{ inputs.actions-ref }}
+        uses: weekendsuperhero-io/platform-tools/.github/actions/apply-pr-description@main
         with:
           jules_output: ${{ steps.collect.outputs.response }}
           pr_number: ${{ inputs.pr-number }}
