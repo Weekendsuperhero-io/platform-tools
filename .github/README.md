@@ -51,7 +51,7 @@ jobs:
   2. Sends the diff + commit messages to Jules AI
   3. Updates the PR with a structured title and description
 - If the PR body doesn't contain the trigger phrase, the workflow skips
-- **Async watch (optional):** deploy [`watch/`](../watch/README.md), store one org-owned fine-grained PAT (all org repos, Actions: write) on the Worker, and set org variable `MUSE_WATCH_URL` + org secret `MUSE_WATCH_HMAC`. Every consumer that copies the wrapper above then parks the runner after session create; muse-watch `repository_dispatch`es that same repo when Jules is done. Omit the URL/HMAC and the job still polls in-process (the old behaviour). Repos outside the org are not covered by that PAT.
+- **Async watch (optional):** deploy [`watch/`](../watch/README.md), store one org-owned fine-grained PAT (all org repos, Contents: write — required for repository_dispatch) on the Worker, and set org variable `MUSE_WATCH_URL` + org secret `MUSE_WATCH_HMAC`. Every consumer that copies the wrapper above then parks the runner after session create; muse-watch `repository_dispatch`es that same repo when Jules is done. Omit the URL/HMAC and the job still polls in-process (the old behaviour). Repos outside the org are not covered by that PAT.
 
 ### 2. Changelog Generator
 

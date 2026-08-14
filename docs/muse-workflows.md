@@ -89,8 +89,9 @@ the runner after session create:
 
 1. Deploy [`watch/`](../watch/README.md) (Cloudflare Worker + one queue).
 2. Create **one** org-owned fine-grained PAT (`Weekendsuperhero-io`, all
-   repositories, Actions: read/write only) and store it as the Worker secret
-   `GITHUB_DISPATCH_TOKEN`. Do not make a token per consumer.
+   repositories, **Contents: read/write** — that is what `repository_dispatch`
+   needs; Actions: write is the wrong permission) and store it as the Worker
+   secret `GITHUB_DISPATCH_TOKEN`. Do not make a token per consumer.
 3. Set **org** variable `MUSE_WATCH_URL` (`gh variable set … --visibility all`
    — the default is private-repos only, which leaves public consumers like
    `platform-tools` with an empty URL) and **org** secret `MUSE_WATCH_HMAC`

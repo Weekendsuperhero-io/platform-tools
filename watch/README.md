@@ -44,7 +44,7 @@ https://github.com/settings/personal-access-tokens/new
 | --- | --- |
 | Resource owner | `Weekendsuperhero-io` |
 | Repository access | **All repositories** (current and future) |
-| Repository permissions | **Actions: Read and write** only |
+| Repository permissions | **Contents: Read and write** (required for `POST /repos/.../dispatches`). Actions: write is *not* enough. |
 | Expiration | 90 days |
 
 If the org requires approval for fine-grained tokens, approve it as an org owner.

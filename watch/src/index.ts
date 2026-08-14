@@ -151,28 +151,35 @@ export default {
   async queue(batch: MessageBatch<Ticket>, env: Env): Promise<void> {
     for (const msg of batch.messages) {
       const t = msg.body;
+      console.log(`queue ${t.repo}#${t.pr} session=${t.session_id}`);
       try {
         const current = await env.TICKETS.get(ticketKey(t.repo, t.pr));
-        if (current && current !== t.session_id) {
+        if (current && current !== String(t.session_id)) {
+          console.log("ack stale (newer session registered)");
           msg.ack();
           continue;
         }
 
         const now = Math.floor(Date.now() / 1000);
         if (now >= t.deadline) {
+          console.log("deadline passed — dispatching timeout");
           await dispatch(env, t, "timeout");
           msg.ack();
           continue;
         }
 
         const state = await julesState(env, t.session_id);
+        console.log(`jules ${state}`);
         if (state === "pending") {
           msg.retry({ delaySeconds: 60 });
           continue;
         }
         await dispatch(env, t, state);
+        console.log(`dispatched ${state}`);
         msg.ack();
       } catch (err) {
+        const msgText = err instanceof Error ? err.message : String(err);
+        console.log(`queue error: ${msgText}`);
         if ((err as { fatal?: boolean }).fatal) {
           msg.ack();
           continue;
