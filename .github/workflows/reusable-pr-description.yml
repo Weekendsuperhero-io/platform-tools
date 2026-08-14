@@ -369,39 +369,23 @@ jobs:
             exit 0
           fi
 
-          # Personal API keys: Authorization: <key>
-          # OAuth / some workspace tokens: Authorization: Bearer <key>
-          # Try both; GraphQL errors used to be swallowed so a 401 looked like "no title".
+          # Personal API keys must be sent as `Authorization: <key>` with no
+          # Bearer prefix. Linear rejects `Bearer lin_api_…` with a 400.
+          LINEAR_API_KEY="${LINEAR_API_KEY#Bearer }"
+          LINEAR_API_KEY="${LINEAR_API_KEY#bearer }"
+
           linear_gql() {
-            local auth="$1" payload="$2"
             curl -sS --max-time 15 https://api.linear.app/graphql \
               -H "Content-Type: application/json" \
-              -H "Authorization: ${auth}" \
-              -d "$payload" 2>/dev/null || true
+              -H "Authorization: ${LINEAR_API_KEY}" \
+              -d "$1" 2>/dev/null || true
           }
 
           ENRICHED='[]'
-          AUTH_STYLE=""
           while IFS= read -r ID; do
             PAYLOAD=$(jq -n --arg id "$ID" \
               '{query: "query($id: String!) { issue(id: $id) { identifier title } }", variables: {id: $id}}')
-
-            RESP=""
-            if [ -n "$AUTH_STYLE" ]; then
-              RESP=$(linear_gql "$AUTH_STYLE" "$PAYLOAD")
-            else
-              RESP=$(linear_gql "$LINEAR_API_KEY" "$PAYLOAD")
-              ERR=$(printf '%s' "$RESP" | jq -r '[.errors[]?.message] | join("; ")' 2>/dev/null || true)
-              TITLE=$(printf '%s' "$RESP" | jq -r '.data.issue.title // empty' 2>/dev/null || true)
-              if [ -z "$TITLE" ] && [ -n "$ERR" ]; then
-                echo "Linear issue($ID) without Bearer: ${ERR}" >&2
-                RESP=$(linear_gql "Bearer ${LINEAR_API_KEY}" "$PAYLOAD")
-                AUTH_STYLE="Bearer ${LINEAR_API_KEY}"
-              else
-                AUTH_STYLE="$LINEAR_API_KEY"
-              fi
-            fi
-
+            RESP=$(linear_gql "$PAYLOAD")
             TITLE=$(printf '%s' "$RESP" | jq -r '.data.issue.title // empty' 2>/dev/null || true)
             ERR=$(printf '%s' "$RESP" | jq -r '[.errors[]?.message] | join("; ")' 2>/dev/null || true)
 
@@ -412,7 +396,7 @@ jobs:
               if [ -n "$TEAM" ] && [ -n "$NUM" ] && [ "$TEAM" != "$ID" ]; then
                 PAYLOAD=$(jq -n --arg key "$TEAM" --argjson number "$NUM" \
                   '{query: "query($key: String!, $number: Float!) { issues(filter: { team: { key: { eq: $key } }, number: { eq: $number } }, first: 1) { nodes { identifier title } } }", variables: {key: $key, number: $number}}')
-                RESP=$(linear_gql "$AUTH_STYLE" "$PAYLOAD")
+                RESP=$(linear_gql "$PAYLOAD")
                 TITLE=$(printf '%s' "$RESP" | jq -r '.data.issues.nodes[0].title // empty' 2>/dev/null || true)
                 ERR=$(printf '%s' "$RESP" | jq -r '[.errors[]?.message] | join("; ")' 2>/dev/null || true)
               fi

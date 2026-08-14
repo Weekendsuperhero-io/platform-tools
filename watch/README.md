@@ -12,6 +12,18 @@ All `wrangler` commands below assume:
 cd watch
 ```
 
+## Secrets (1Password or pasted values)
+
+```bash
+cp .env.example .env
+# edit .env — each secret can be the value or op://Vault/Item/field
+pnpm secrets:sync
+```
+
+That writes the Worker secrets (`wrangler secret put`) and the org GitHub
+variable/secrets (`MUSE_WATCH_URL`, `MUSE_WATCH_HMAC`, `JULES_API_KEY`,
+optional `LINEAR_API_KEY`). Values are never printed. `.env` is gitignored.
+
 ## One-time setup (CLI first)
 
 Do these in order. Browser is only needed for `wrangler login` (once) and creating the GitHub PAT.

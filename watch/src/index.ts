@@ -49,7 +49,10 @@ async function julesState(env: Env, sessionId: string): Promise<JulesState> {
     { headers: { "x-goog-api-key": env.JULES_API_KEY } },
   );
   if (!res.ok) {
-    throw new Error(`jules ${res.status}`);
+    const err = new Error(`jules ${res.status}`);
+    (err as Error & { fatal?: boolean }).fatal =
+      res.status === 401 || res.status === 403;
+    throw err;
   }
   const json = (await res.json()) as {
     activities?: Array<{
