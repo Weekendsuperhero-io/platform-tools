@@ -34,7 +34,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-      actions: write
+      actions: read
     uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-pr-description.yml@main
     with:
       trigger-phrase: "@agent pr-title"     # gate: must appear in the PR body

@@ -31,7 +31,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-      actions: write
+      actions: read
     uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-pr-description.yml@main
     with:
       trigger-phrase: "@agent pr-title" # optional — only runs if this phrase is in the PR body
