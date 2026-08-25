@@ -109,7 +109,7 @@ on:
         description: "Deadline for async watch (seconds after session create)"
         type: number
         required: false
-        default: 1200
+        default: 2700
     secrets:
       JULES_API_KEY:
         required: true
@@ -603,6 +603,7 @@ jobs:
         with:
           title: "PR Title and Description"
           jules_api_key: ${{ secrets.JULES_API_KEY }}
+          max_wait_seconds: ${{ inputs.max-wait-seconds }}
 
       - name: Update PR
         if: (steps.check.outputs.skip != 'true' || github.event_name != 'pull_request') && steps.watch.outputs.enabled != 'true'

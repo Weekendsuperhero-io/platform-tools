@@ -113,19 +113,31 @@ Changelog and PR review stay on the blocking poll.
 name: Update Changelog
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [muse-changelog-ready]
 
 jobs:
   changelog:
     permissions:
       contents: write
+      actions: read
     uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-changelog.yml@main
     with:
       changelog-path: CHANGELOG.md
       internal-changelog-path: CHANGELOG_INTERNAL.md   # omit for single-file mode
       runs-on: warp-ubuntu-latest-x64-4x
       pr-branch-prefix: "chore/changelog-"
+      mode: ${{ github.event_name == 'repository_dispatch' && 'apply' || 'start' }}
+      session-id: ${{ github.event.client_payload.session_id || '' }}
+      outcome: ${{ github.event.client_payload.outcome || '' }}
+      start-run-id: ${{ github.event.client_payload.start_run_id || '' }}
     secrets: inherit
 ```
+
+`repository_dispatch` must be on the **default branch**. With org `MUSE_WATCH_URL` +
+`MUSE_WATCH_HMAC`, start creates a Jules session and returns; apply opens the
+changelog PR when Jules is done (up to 45 minutes). Without those, the job
+still polls in-process.
 
 Finds the commits since the last changelog-touching commit and opens a PR
 with new entries inserted under `## [Unreleased]`.

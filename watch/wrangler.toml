@@ -20,4 +20,4 @@ queue = "muse-watch"
 queue = "muse-watch"
 max_batch_size = 1
 max_batch_timeout = 0
-max_retries = 25
+max_retries = 50

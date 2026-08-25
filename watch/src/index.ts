@@ -43,8 +43,11 @@ function timingSafeEqual(a: string, b: string): boolean {
   return out === 0;
 }
 
-function ticketKey(t: Pick<Ticket, "repo" | "pr" | "agent">): string {
+function ticketKey(t: Pick<Ticket, "repo" | "pr" | "agent" | "event_type" | "start_run_id">): string {
   if (t.agent) return `pr:${t.repo}:${t.pr}:${t.agent}`;
+  if (t.event_type === "muse-changelog-ready") {
+    return `changelog:${t.repo}:${t.start_run_id}`;
+  }
   return `pr:${t.repo}:${t.pr}`;
 }
 
@@ -140,7 +143,7 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
   }
 
   await env.TICKETS.put(ticketKey(t), String(t.session_id), {
-    expirationTtl: 60 * 40,
+    expirationTtl: 60 * 55,
   });
   await env.WATCH.send(t, { delaySeconds: 45 });
   return new Response("ok");

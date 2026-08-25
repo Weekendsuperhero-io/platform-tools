@@ -62,6 +62,8 @@ name: Update Changelog
 
 on:
   workflow_dispatch: # manual trigger
+  repository_dispatch:
+    types: [muse-changelog-ready]
   # schedule:
   #   - cron: "0 0 * * 1"  # every Monday (optional)
 
@@ -69,10 +71,15 @@ jobs:
   changelog:
     permissions:
       contents: write
-    uses: <owner>/<repo>/.github/workflows/reusable-changelog.yml@main
+      actions: read
+    uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-changelog.yml@main
     with:
       changelog-path: CHANGELOG.md
       pr-branch-prefix: "chore/changelog-"
+      mode: ${{ github.event_name == 'repository_dispatch' && 'apply' || 'start' }}
+      session-id: ${{ github.event.client_payload.session_id || '' }}
+      outcome: ${{ github.event.client_payload.outcome || '' }}
+      start-run-id: ${{ github.event.client_payload.start_run_id || '' }}
     secrets: inherit
 ```
 

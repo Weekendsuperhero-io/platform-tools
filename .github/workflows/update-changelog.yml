@@ -5,13 +5,20 @@ name: Generate Changelog PR
 
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [muse-changelog-ready]
 
 jobs:
   update-changelog:
     permissions:
       contents: write
+      actions: read
     uses: ./.github/workflows/reusable-changelog.yml
     with:
       changelog-path: CHANGELOG.md
       pr-branch-prefix: "chore/update-changelog"
+      mode: ${{ github.event_name == 'repository_dispatch' && 'apply' || 'start' }}
+      session-id: ${{ github.event.client_payload.session_id || '' }}
+      outcome: ${{ github.event.client_payload.outcome || '' }}
+      start-run-id: ${{ github.event.client_payload.start_run_id || '' }}
     secrets: inherit

@@ -1,0 +1,106 @@
+# Insert Jules changelog output under ## [Unreleased] (single-file or split).
+
+name: "Apply changelog patch"
+description: "Patch CHANGELOG file(s) from a Jules changelog response"
+
+inputs:
+  jules_output:
+    required: true
+  changelog_path:
+    required: true
+  internal_path:
+    required: false
+    default: ""
+  unreleased_heading:
+    required: false
+    default: "## [Unreleased]"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Patch changelog files
+      shell: bash
+      env:
+        CHANGELOG_PATH: ${{ inputs.changelog_path }}
+        INTERNAL_PATH: ${{ inputs.internal_path }}
+        UNRELEASED: ${{ inputs.unreleased_heading }}
+        NEW_ENTRIES: ${{ inputs.jules_output }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "$NEW_ENTRIES" ]; then
+          echo "::error::No output from Jules"
+          exit 1
+        fi
+
+        insert_under_unreleased() {
+          local file="$1" entries="$2"
+
+          if ! grep -Fxq "$UNRELEASED" "$file"; then
+            echo "Unreleased heading missing in $file. Prepending '$UNRELEASED'."
+            {
+              printf '%s\n\n' "$UNRELEASED"
+              cat "$file"
+            } > /tmp/changelog_with_heading.md
+            mv /tmp/changelog_with_heading.md "$file"
+          fi
+
+          entries="$entries" awk -v heading="$UNRELEASED" '
+            $0 == heading {
+              print $0
+              print ""
+              print ENVIRON["entries"]
+              next
+            }
+            { print }
+          ' "$file" > /tmp/changelog_new.md
+          mv /tmp/changelog_new.md "$file"
+        }
+
+        if [ -z "$INTERNAL_PATH" ]; then
+          insert_under_unreleased "$CHANGELOG_PATH" "$NEW_ENTRIES"
+          echo "=== Updated changelog (first 40 lines) ==="
+          head -40 "$CHANGELOG_PATH"
+          exit 0
+        fi
+
+        printf '%s' "$NEW_ENTRIES" | sed 's/^```json//;s/^```//;s/```$//' | tr -d '\r' > /tmp/changelog_parts.txt
+        if ! jq -e 'type == "object"' /tmp/changelog_parts.txt > /dev/null 2>&1; then
+          echo "::error::Jules output is not the expected JSON object"
+          head -40 /tmp/changelog_parts.txt
+          exit 1
+        fi
+
+        render_part() {
+          jq -r --arg part "$1" '
+            (.[$part] // {}) as $p
+            | ["Added","Changed","Fixed","Removed","Security","Deprecated"]
+            | map(. as $cat
+                | ($p[$cat] // [])
+                | if length > 0 then "### \($cat)\n\n\(join("\n"))\n" else empty end)
+            | join("\n")' /tmp/changelog_parts.txt
+        }
+
+        USER_MD=$(render_part user_facing)
+        INTERNAL_MD=$(render_part internal)
+
+        if [ -z "$USER_MD" ] && [ -z "$INTERNAL_MD" ]; then
+          echo "::error::Jules returned no entries in either part"
+          exit 1
+        fi
+
+        if [ -n "$USER_MD" ]; then
+          insert_under_unreleased "$CHANGELOG_PATH" "$USER_MD"
+          echo "=== Updated $CHANGELOG_PATH (first 40 lines) ==="
+          head -40 "$CHANGELOG_PATH"
+        else
+          echo "No user-facing entries this round — $CHANGELOG_PATH untouched"
+        fi
+
+        if [ -n "$INTERNAL_MD" ]; then
+          insert_under_unreleased "$INTERNAL_PATH" "$INTERNAL_MD"
+          echo "=== Updated $INTERNAL_PATH (first 40 lines) ==="
+          head -40 "$INTERNAL_PATH"
+        else
+          echo "No internal entries this round — $INTERNAL_PATH untouched"
+        fi

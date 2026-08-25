@@ -69,7 +69,7 @@ on:
         description: "Maximum seconds to wait for each Jules session"
         type: number
         required: false
-        default: 1200
+        default: 2700
       mode:
         description: "start (labeled/synchronize) or apply (muse-pr-review-ready). Empty infers start."
         type: string
