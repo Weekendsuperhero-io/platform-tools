@@ -30,6 +30,11 @@ on:
         type: string
         required: false
         default: "chore/update-changelog"
+      base-branch:
+        description: "Branch to collect commits from and open the changelog PR against. Empty (default) uses the branch this workflow was invoked on."
+        type: string
+        required: false
+        default: ""
       diff-file-patterns:
         description: "Space-separated glob patterns for files to include in the diff"
         type: string
@@ -172,6 +177,7 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token || github.token }}
           fetch-depth: 0
+          ref: ${{ inputs.base-branch || github.ref }}
 
       - name: Ensure changelog exists
         shell: bash
@@ -223,8 +229,15 @@ jobs:
           INTERNAL_PATH: ${{ inputs.internal-changelog-path }}
           FALLBACK_COUNT: ${{ inputs.fallback-commit-count }}
           MAX_COMMITS: ${{ inputs.max-commit-messages }}
+          INPUT_BASE_BRANCH: ${{ inputs.base-branch }}
         run: |
           set -euo pipefail
+
+          BASE_BRANCH="${INPUT_BASE_BRANCH:-$GITHUB_REF_NAME}"
+          BASE_SHA=$(git rev-parse HEAD)
+          echo "Source branch: $BASE_BRANCH ($BASE_SHA)"
+          echo "base_branch=$BASE_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
 
           LAST_CHANGELOG_SHA=$(git log -1 --format='%H' -- "$CHANGELOG_PATH" 2>/dev/null || true)
 
@@ -392,6 +405,8 @@ jobs:
           PR_TITLE: ${{ inputs.pr-title }}
           PR_BODY: ${{ format(inputs.pr-body-template, steps.changes.outputs.commit_count) }}
           PR_BRANCH_PREFIX: ${{ inputs.pr-branch-prefix }}
+          BASE_BRANCH: ${{ steps.changes.outputs.base_branch }}
+          BASE_SHA: ${{ steps.changes.outputs.base_sha }}
         run: |
           set -euo pipefail
           HMAC=$(printf '%s' "$HMAC" | tr -d '\r\n')
@@ -408,7 +423,9 @@ jobs:
             --arg pr_title "$PR_TITLE" \
             --arg pr_body "$PR_BODY" \
             --arg pr_branch_prefix "$PR_BRANCH_PREFIX" \
-            '{changelog_path:$changelog_path, internal_path:$internal_path, unreleased:$unreleased, commit_count:$commit_count, pr_title:$pr_title, pr_body:$pr_body, pr_branch_prefix:$pr_branch_prefix}' \
+            --arg base_branch "$BASE_BRANCH" \
+            --arg base_sha "$BASE_SHA" \
+            '{changelog_path:$changelog_path, internal_path:$internal_path, unreleased:$unreleased, commit_count:$commit_count, pr_title:$pr_title, pr_body:$pr_body, pr_branch_prefix:$pr_branch_prefix, base_branch:$base_branch, base_sha:$base_sha}' \
             > /tmp/ticket/meta.json
 
           DEADLINE=$(( $(date +%s) + MAX_WAIT ))
@@ -419,7 +436,8 @@ jobs:
             --argjson deadline "$DEADLINE" \
             --argjson start_run_id "$GITHUB_RUN_ID" \
             --arg event_type "muse-changelog-ready" \
-            '{session_id:$session_id, repo:$repo, pr:$pr, deadline:$deadline, start_run_id:$start_run_id, event_type:$event_type}')
+            --arg base_branch "$BASE_BRANCH" \
+            '{session_id:$session_id, repo:$repo, pr:$pr, deadline:$deadline, start_run_id:$start_run_id, event_type:$event_type, base_branch:$base_branch}')
           SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$HMAC" | awk '{print $NF}')
           HTTP=$(curl -sS -o /tmp/watch_res.txt -w '%{http_code}' -X POST "${WATCH_URL%/}/watch" \
             -H "content-type: application/json" \
@@ -484,6 +502,7 @@ jobs:
           title: ${{ inputs.pr-title }}
           body: ${{ format(inputs.pr-body-template, steps.changes.outputs.commit_count) }}
           branch: "${{ inputs.pr-branch-prefix }}${{ github.run_id }}"
+          base: ${{ steps.changes.outputs.base_branch }}
           add-paths: ${{ steps.paths.outputs.add_paths }}
 
   apply:
@@ -563,12 +582,6 @@ jobs:
           echo "email=$BOT_EMAIL" >> "$GITHUB_OUTPUT"
           echo "identity=${BOT_NAME} <${BOT_EMAIL}>" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          token: ${{ steps.app-token.outputs.token || github.token }}
-          fetch-depth: 0
-
       - name: Download changelog ticket
         env:
           GH_TOKEN: ${{ github.token }}
@@ -579,6 +592,34 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --name changelog-ticket \
             --dir /tmp/ticket
+
+      - name: Read changelog ticket
+        id: ticket
+        env:
+          INPUT_BASE_BRANCH: ${{ inputs.base-branch }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          BASE_BRANCH=$(jq -r '.base_branch // empty' /tmp/ticket/meta.json)
+          BASE_SHA=$(jq -r '.base_sha // empty' /tmp/ticket/meta.json)
+          if [ -z "$BASE_BRANCH" ]; then
+            BASE_BRANCH="$INPUT_BASE_BRANCH"
+          fi
+          if [ -z "$BASE_BRANCH" ]; then
+            BASE_BRANCH="$DEFAULT_BRANCH"
+            echo "::warning::Ticket missing base_branch; falling back to default branch ${BASE_BRANCH}"
+          fi
+          REF="${BASE_SHA:-$BASE_BRANCH}"
+          echo "Changelog PR will target ${BASE_BRANCH} (checkout ${REF})"
+          echo "base_branch=${BASE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          token: ${{ steps.app-token.outputs.token || github.token }}
+          fetch-depth: 0
+          ref: ${{ steps.ticket.outputs.ref }}
 
       - name: Restore changelog files from start
         run: |
@@ -642,4 +683,5 @@ jobs:
           title: ${{ steps.paths.outputs.title }}
           body: ${{ steps.paths.outputs.body }}
           branch: "${{ steps.paths.outputs.prefix }}${{ inputs.start-run-id }}"
+          base: ${{ steps.ticket.outputs.base_branch }}
           add-paths: ${{ steps.paths.outputs.add_paths }}

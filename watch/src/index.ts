@@ -16,6 +16,8 @@ export type Ticket = {
   event_type?: string;
   /** Review agent slot; omitted for PR-description tickets. */
   agent?: string;
+  /** Changelog source branch; omitted for PR tickets. */
+  base_branch?: string;
 };
 
 type JulesState = "pending" | "ready" | "failed";
@@ -98,6 +100,7 @@ async function dispatch(env: Env, t: Ticket, outcome: string): Promise<void> {
         outcome,
         start_run_id: t.start_run_id,
         agent: t.agent ?? "",
+        ...(t.base_branch ? { base_branch: t.base_branch } : {}),
       },
     }),
   });
@@ -138,7 +141,15 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
   } catch {
     return new Response("bad json", { status: 400 });
   }
-  if (!t.session_id || !t.repo || !t.pr || !t.deadline || !t.start_run_id) {
+  // pr is 0 for changelog (no pull request). Do not use `!t.pr`.
+  if (
+    !t.session_id ||
+    !t.repo ||
+    typeof t.pr !== "number" ||
+    t.pr < 0 ||
+    !t.deadline ||
+    !t.start_run_id
+  ) {
     return new Response("missing fields", { status: 400 });
   }
 

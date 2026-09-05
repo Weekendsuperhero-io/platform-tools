@@ -100,10 +100,9 @@ the runner after session create:
 4. Each consumer still needs the wrapper above (`repository_dispatch` + `mode`
    / payload inputs). The reusable workflow cannot listen for dispatch itself.
 
-The Worker only stores `{session_id, repo, pr, deadline, start_run_id}`. It
-GETs Jules activities on a 60s queue delay, then dispatches **that consumer
-repo** to run `apply` (one `jules-collect` + Linear render + `gh pr edit`).
-Changelog and PR review stay on the blocking poll.
+The Worker only stores `{session_id, repo, pr, deadline, start_run_id}` (plus
+optional `agent` / `base_branch`). It GETs Jules activities on a 60s queue
+delay, then dispatches **that consumer repo** to run `apply`.
 
 ---
 
@@ -131,6 +130,7 @@ jobs:
       session-id: ${{ github.event.client_payload.session_id || '' }}
       outcome: ${{ github.event.client_payload.outcome || '' }}
       start-run-id: ${{ github.event.client_payload.start_run_id || '' }}
+      base-branch: ${{ github.event.client_payload.base_branch || github.ref_name }}
     secrets: inherit
 ```
 
@@ -138,6 +138,13 @@ jobs:
 `MUSE_WATCH_HMAC`, start creates a Jules session and returns; apply opens the
 changelog PR when Jules is done (up to 45 minutes). Without those, the job
 still polls in-process.
+
+The changelog PR targets the **branch the workflow was invoked on**, not the
+repository default. Run it from `beta` (Actions UI branch dropdown, or
+`gh workflow run … --ref beta`) and the PR opens against `beta`. Apply still
+listens on the default-branch workflow file; it checks out the start run's
+ref and sets that as `base`. Override with `base-branch` if you need a
+different target than the invoking ref.
 
 Finds the commits since the last changelog-touching commit and opens a PR
 with new entries inserted under `## [Unreleased]`.

@@ -80,16 +80,17 @@ jobs:
       session-id: ${{ github.event.client_payload.session_id || '' }}
       outcome: ${{ github.event.client_payload.outcome || '' }}
       start-run-id: ${{ github.event.client_payload.start_run_id || '' }}
+      base-branch: ${{ github.event.client_payload.base_branch || github.ref_name }}
     secrets: inherit
 ```
 
 **How it works:**
 
-- Finds the last commit that touched `CHANGELOG.md`
+- Finds the last commit that touched `CHANGELOG.md` on the branch you ran the workflow from
 - Collects all commits since then
 - Sends full commit messages (subject + body) to Jules AI to generate changelog entries
 - Inserts entries under `## [Unreleased]` (Keep a Changelog format)
-- Creates a PR with the updated changelog
+- Creates a PR **against that same branch** (not always `main`). Run from `beta` to land changelog fixes on `beta`.
 
 ### 3. Rust CI (Reusable)
 
@@ -190,6 +191,7 @@ jobs:
 | ----------------------- | --------------------------- | ------------------------------------------------ |
 | `changelog-path`        | `CHANGELOG.md`              | Path to your changelog file                      |
 | `pr-branch-prefix`      | `chore/update-changelog`    | Prefix for the generated PR branch               |
+| `base-branch`           | _(invoking branch)_         | Branch to collect commits from and open the PR against |
 | `max-commit-messages`   | `50`                        | Max full commit messages (subject + body) to include |
 | `diff-file-patterns`    | _(legacy)_                  | Deprecated and ignored (kept for compatibility)  |
 | `diff-exclude-patterns` | _(legacy)_                  | Deprecated and ignored (kept for compatibility)  |
@@ -325,3 +327,8 @@ flowchart TD
 **Changelog entries appear in wrong place:**
 
 - Ensure your changelog has the exact `## [Unreleased]` heading (or configure `unreleased-heading`)
+
+**Changelog PR opened against `main` instead of `beta`:**
+
+- Run the workflow *from* that branch (Actions → Run workflow → Use workflow from `beta`, or `gh workflow run … --ref beta`). `create-pull-request` used to default `base` to the repo default branch; the reusable now persists the invoking ref and opens the PR against it.
+- Apply still listens on the default-branch workflow file. That is expected; the PR target comes from the start run, not from apply's `github.ref`.

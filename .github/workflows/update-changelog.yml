@@ -21,4 +21,5 @@ jobs:
       session-id: ${{ github.event.client_payload.session_id || '' }}
       outcome: ${{ github.event.client_payload.outcome || '' }}
       start-run-id: ${{ github.event.client_payload.start_run_id || '' }}
+      base-branch: ${{ github.event.client_payload.base_branch || github.ref_name }}
     secrets: inherit

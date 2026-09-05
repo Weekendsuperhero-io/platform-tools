@@ -2,7 +2,7 @@
 
 Cloudflare Worker that waits on a Jules session without holding a GitHub Actions runner. Used by the PR-description workflow when `watch-url` + `MUSE_WATCH_HMAC` are set.
 
-The queue holds `{session_id, repo, pr, deadline, start_run_id}` only. Prompt text, diffs, and Jules answers never leave Actions.
+The queue holds `{session_id, repo, pr, deadline, start_run_id}` plus optional `agent` / `base_branch`. Prompt text, diffs, and Jules answers never leave Actions.
 
 This Worker is **not** wired to the Cloudflare GitHub App (that app is for another repo). Deploy from this directory with Wrangler.
 
