@@ -160,7 +160,7 @@ on:
         required: false
         default: ""
       update-lockfile:
-        description: Run cargo generate-lockfile before publish
+        description: Run cargo generate-lockfile before publish, for a repository that commits no Cargo.lock (a committed lock is published as it is)
         type: boolean
         required: false
         default: true
@@ -625,9 +625,21 @@ jobs:
         if: runner.os == 'Linux' && inputs.publish-linux-packages != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ inputs.publish-linux-packages }}
 
+      # Only for a repository that commits no Cargo.lock. A committed lock is
+      # what CI tested and what `cargo publish --locked` ships. Regenerating
+      # it here re-resolves to newer versions and leaves the tree dirty, and
+      # cargo refuses to publish from a dirty tree (agentmail v0.9.3 and
+      # eventkit-rs v0.9.1, 2026-10-28).
       - name: Update lockfile
         if: inputs.update-lockfile
-        run: cargo generate-lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-files --error-unmatch Cargo.lock >/dev/null 2>&1; then
+            echo "Cargo.lock is committed: publishing it as tested."
+          else
+            cargo generate-lockfile
+          fi
 
       - name: Verify crates.io token
         shell: bash
