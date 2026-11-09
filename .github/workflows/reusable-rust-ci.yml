@@ -53,6 +53,15 @@ on:
         type: string
         required: false
         default: cargo test --all-features
+      install-nextest:
+        description: >
+          Install a prebuilt cargo-nextest before the tests (taiki-e/install-action,
+          seconds on every runner OS), so test-command can run `cargo nextest`
+          without compiling it or falling back to `cargo test`. nextest skips
+          doctests: add `&& cargo test --doc` to test-command when the crate has them.
+        type: boolean
+        required: false
+        default: false
       run-docs:
         description: Whether to run docs job
         type: boolean
@@ -119,6 +128,12 @@ jobs:
 
       - name: Build
         run: ${{ inputs.build-command }}
+
+      - name: Install cargo-nextest
+        if: inputs.install-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
 
       - name: Run tests
         run: ${{ inputs.test-command }}
