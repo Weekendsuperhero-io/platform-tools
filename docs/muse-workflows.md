@@ -35,6 +35,7 @@ jobs:
       contents: read
       pull-requests: write
       actions: read
+      checks: write
     uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-pr-description.yml@main
     with:
       trigger-phrase: "@agent pr-title"     # gate: must appear in the PR body
@@ -99,6 +100,8 @@ the runner after session create:
    `secrets: inherit` works on every wrapper.
 4. Each consumer still needs the wrapper above (`repository_dispatch` + `mode`
    / payload inputs). The reusable workflow cannot listen for dispatch itself.
+   Grant `checks: write` so apply can attach a check run to the PR; without it
+   the dispatch job exists only under Actions.
 
 The Worker only stores `{session_id, repo, pr, deadline, start_run_id}` (plus
 optional `agent` / `base_branch`). It GETs Jules activities on a 60s queue
@@ -120,6 +123,7 @@ jobs:
     permissions:
       contents: write
       actions: read
+      checks: write
     uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-changelog.yml@main
     with:
       changelog-path: CHANGELOG.md
@@ -138,6 +142,12 @@ jobs:
 `MUSE_WATCH_HMAC`, start creates a Jules session and returns; apply opens the
 changelog PR when Jules is done (up to 45 minutes). Without those, the job
 still polls in-process.
+
+`workflow_dispatch` / `repository_dispatch` runs only appear under Actions by
+default. Apply (and the in-process changelog job) posts a **check run** on the
+PR head so the same run shows in the PR Checks tab. Callers need
+`permissions.checks: write` (GITHUB_TOKEN); without it the check is skipped
+and a warning is logged.
 
 The changelog PR targets the **branch the workflow was invoked on**, not the
 repository default. Run it from `beta` (Actions UI branch dropdown, or
@@ -197,6 +207,7 @@ jobs:
       issues: write
       pull-requests: write
       actions: read
+      checks: write
     uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-pr-review.yml@main
     with:
       runs-on: warp-ubuntu-latest-x64-4x
@@ -214,7 +225,9 @@ jobs:
 
 Both comments in that snippet are **load-bearing** — copy them with the code.
 The `repository_dispatch` block must be on the **default branch** or apply
-never runs (GitHub returns 204 and no job appears).
+never runs (GitHub returns 204 and no job appears). Apply also posts a check
+run on the PR head (`permissions.checks: write`) so the dispatch job shows
+in Checks, not only under Actions.
 
 When org `MUSE_WATCH_URL` + `MUSE_WATCH_HMAC` are set, start creates three
 Jules sessions and returns; muse-watch dispatches `muse-pr-review-ready`

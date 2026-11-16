@@ -1,0 +1,110 @@
+/// One runner owns checkout, discovery, generation checks and OpenTofu checks.
+module platform.workflows.opentofu
+
+import "@com.github.actions/Step.pkl"
+import "@com.github.actions/Workflow.pkl"
+import "base.pkl"
+import "render.pkl"
+import "runners.pkl"
+import "triggers.pkl"
+import "steps/actions.pkl" as actions
+import "steps/checkout.pkl" as checkout
+
+workflowSource: String = ".github/pkl/opentofu.pkl"
+sharedDirectory: String = ".github/vendor/platform-tools"
+configurationRoot: String = "infrastructure"
+versionFile: String = ".opentofu-version"
+versionCheck: String?
+pushBranches: List<String> = List("main")
+includePaths: List<String> = List(configurationRoot + "/**", ".github/**", "scripts/render-workflows.sh", versionFile)
+
+workflowName: String = "OpenTofu"
+
+local workflow: Workflow = (base) {
+  name = workflowName
+  on = triggers.pushAndPullRequest(pushBranches, includePaths)
+  permissions { contents = "read" }
+  concurrency = new Workflow.Concurrency {
+    group = "opentofu-${{ github.workflow }}-${{ github.ref }}"
+    `cancel-in-progress` = true
+  }
+
+  jobs {
+    ["validate"] {
+      `runs-on` = runners.linux4x
+      `timeout-minutes` = 30
+      env {
+        ["TF_IN_AUTOMATION"] = "true"
+        ["TF_INPUT"] = "false"
+        ["TF_PLUGIN_CACHE_DIR"] = "${{ github.workspace }}/.opentofu-plugin-cache"
+        ["SHARED_WORKFLOWS_DIR"] = sharedDirectory
+        ["OPENTOFU_ROOT"] = configurationRoot
+        ["OPENTOFU_MANIFEST"] = "${{ github.workspace }}/.cache/opentofu-configurations.json"
+      }
+      steps {
+        new checkout.Checkout {}.step()
+        new Step {
+          name = "Restore workflow tools"
+          uses = actions.cache
+          with {
+            ["path"] = ".cache/workflow-tools"
+            ["key"] = "${{ runner.os }}-${{ runner.arch }}-workflow-tools-${{ hashFiles('\(sharedDirectory)/tools.json') }}-${{ hashFiles('.github/**/*.pkl', '.github/**/*.json', '.github/**/*.yaml', '.github/**/*.yml', 'scripts/render-workflows.sh') }}"
+            ["restore-keys"] = "${{ runner.os }}-${{ runner.arch }}-workflow-tools-${{ hashFiles('\(sharedDirectory)/tools.json') }}-"
+          }
+        }
+        new Step {
+          name = "Restore OpenTofu providers"
+          uses = actions.cache
+          with {
+            ["path"] = ".opentofu-plugin-cache"
+            ["key"] = "${{ runner.os }}-${{ runner.arch }}-opentofu-${{ hashFiles('\(versionFile)') }}-${{ hashFiles('\(configurationRoot)/**/.terraform.lock.hcl') }}"
+            ["restore-keys"] = "${{ runner.os }}-${{ runner.arch }}-opentofu-${{ hashFiles('\(versionFile)') }}-"
+          }
+        }
+        new Step {
+          name = "Create provider cache directory"
+          run = "mkdir -p \"$TF_PLUGIN_CACHE_DIR\""
+        }
+        new Step {
+          name = "Check workflows match Pkl"
+          run = "python3 \"$SHARED_WORKFLOWS_DIR/render_workflows.py\" --check"
+        }
+        new Step {
+          name = "Lint workflows"
+          run = "python3 \"$SHARED_WORKFLOWS_DIR/render_workflows.py\" --lint"
+        }
+        new Step {
+          name = "Set up OpenTofu"
+          uses = actions.setupOpenTofu
+          with {
+            ["tofu_version_file"] = versionFile
+            ["tofu_wrapper"] = false
+          }
+        }
+        new Step {
+          name = "Discover OpenTofu configurations"
+          run = "python3 \"$SHARED_WORKFLOWS_DIR/opentofu.py\" discover --root \"$OPENTOFU_ROOT\" --output \"$OPENTOFU_MANIFEST\""
+        }
+        new Step {
+          name = "Check OpenTofu formatting"
+          run = "tofu fmt -check -recursive \"$OPENTOFU_ROOT\""
+        }
+        when (versionCheck != null) {
+          new Step {
+            name = "Check OpenTofu version pins"
+            run = versionCheck
+          }
+        }
+        new Step {
+          name = "Validate configurations and run tests"
+          run = "python3 \"$SHARED_WORKFLOWS_DIR/opentofu.py\" check --manifest \"$OPENTOFU_MANIFEST\""
+        }
+      }
+    }
+  }
+}
+
+output {
+  value = render.workflowValue(workflow)
+  text = render.renderedText(workflowSource, workflow.output.text)
+}

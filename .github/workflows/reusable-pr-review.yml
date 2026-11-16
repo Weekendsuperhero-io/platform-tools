@@ -627,6 +627,7 @@ jobs:
       issues: write
       pull-requests: write
       actions: read
+      checks: write
     steps:
       - name: Validate watch outcome
         id: gate
@@ -757,6 +758,26 @@ jobs:
       - name: Fail on Jules error
         if: steps.gate.outputs.ready != 'true'
         run: exit 1
+
+      - name: Resolve PR head
+        if: always()
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr-number }}
+        run: |
+          set -euo pipefail
+          SHA=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid) || true
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Show run on the pull request
+        if: always() && steps.pr.outputs.sha != ''
+        uses: weekendsuperhero-io/platform-tools/.github/actions/report-pr-check@main
+        with:
+          name: Muse ${{ inputs.agent }}
+          head_sha: ${{ steps.pr.outputs.sha }}
+          conclusion: ${{ job.status == 'success' && 'success' || job.status == 'cancelled' && 'cancelled' || 'failure' }}
+          title: ${{ job.status == 'success' && format('Muse {0} applied', inputs.agent) || format('Muse {0} failed', inputs.agent) }}
 
   # ── Map verdicts to labels; flag agent failures. ────────────────────────
   finalize:

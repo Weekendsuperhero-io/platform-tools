@@ -1,0 +1,11 @@
+/// Shared YAML settings, adapted from agent/.github/pkl/base.pkl.
+amends "@com.github.actions/Workflow.pkl"
+
+output {
+  renderer {
+    mode = "1.2"
+    converters {
+      ["jobs[*].steps"] = (steps) -> if (steps is Listing && steps.isEmpty) null else steps
+    }
+  }
+}

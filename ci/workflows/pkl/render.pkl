@@ -1,0 +1,22 @@
+/// Workflow rendering, adapted from agent/.github/pkl/render.pkl.
+module platform.workflows.render
+
+import "@com.github.actions/Workflow.pkl"
+
+function workflowValue(workflow: Workflow): Dynamic = new {
+  name = workflow.name
+  `run-name` = workflow.`run-name`
+  on = workflow.on
+  env = workflow.env
+  concurrency = workflow.concurrency
+  permissions = workflow.permissions
+  jobs = workflow.jobs
+}
+
+function renderedText(source: String, raw: String): String =
+  let (header = "# Generated from Workflow.pkl. DO NOT EDIT.\n")
+    """
+    # Generated from \(source). DO NOT EDIT.
+    # Regenerate with `scripts/render-workflows.sh`.
+    \(if (raw.startsWith(header)) raw.drop(header.length) else raw)
+    """

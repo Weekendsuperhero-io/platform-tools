@@ -623,6 +623,7 @@ jobs:
       contents: read
       pull-requests: write
       actions: read
+      checks: write
     steps:
       - name: Validate watch outcome
         env:
@@ -710,3 +711,23 @@ jobs:
           gh_token: ${{ steps.app-token.outputs.token || github.token }}
           linear_candidates_file: /tmp/ticket/linear_candidates.json
           linear_human_verbs_file: /tmp/ticket/linear_human_verbs.txt
+
+      - name: Resolve PR head
+        if: always()
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr-number }}
+        run: |
+          set -euo pipefail
+          SHA=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid) || true
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Show run on the pull request
+        if: always() && steps.pr.outputs.sha != ''
+        uses: weekendsuperhero-io/platform-tools/.github/actions/report-pr-check@main
+        with:
+          name: Muse PR description
+          head_sha: ${{ steps.pr.outputs.sha }}
+          conclusion: ${{ job.status == 'success' && 'success' || job.status == 'cancelled' && 'cancelled' || 'failure' }}
+          title: ${{ job.status == 'success' && 'Description updated' || 'Failed to update description' }}

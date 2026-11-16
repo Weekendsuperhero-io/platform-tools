@@ -1,0 +1,21 @@
+/// Shared trigger construction, copied from agent/.github/pkl/triggers.pkl.
+module platform.workflows.triggers
+
+import "@com.github.actions/Workflow.pkl"
+
+function pushAndPullRequest(branchNames: List<String>, includePaths: List<String>): Workflow.On = new {
+  push {
+    branches {
+      for (branch in branchNames) { branch }
+    }
+    paths {
+      for (path in includePaths) { path }
+    }
+  }
+  pull_request {
+    paths {
+      for (path in includePaths) { path }
+    }
+  }
+  workflow_dispatch = new Workflow.WorkflowDispatch {}
+}

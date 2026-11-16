@@ -1,0 +1,21 @@
+/// Typed checkout step, adapted from agent/.github/pkl/steps/checkout.pkl.
+module platform.workflows.steps.checkout
+
+import "@com.github.actions/Step.pkl"
+import "actions.pkl"
+
+class Checkout {
+  fetchDepth: Int = 1
+  lfs: Boolean = false
+  submodules: String | Boolean = false
+
+  function step(): Step = new {
+    name = "Checkout"
+    uses = actions.checkout
+    with {
+      ["fetch-depth"] = fetchDepth
+      ["lfs"] = lfs
+      ["submodules"] = submodules
+    }
+  }
+}

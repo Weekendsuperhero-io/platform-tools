@@ -20,3 +20,6 @@ Thumbs.db
 .vscode/
 
 .wrangler/
+
+/.cache/
+__pycache__/

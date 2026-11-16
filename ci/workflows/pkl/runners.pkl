@@ -1,0 +1,13 @@
+/// Shared BYOC runner policy, copied from agent/.github/pkl/runners.pkl.
+module platform.workflows.runners
+
+const onDemandSource: String = "contains(fromJSON('[\"main\",\"beta\"]'), github.head_ref || github.ref_name)"
+const linux4xOnDemand: String = "warp-custom-linux-2404-x64-4x-ondemand"
+const linux4xSpot: String = "warp-custom-linux-2404-x64-4x"
+const windows16xOnDemand: String = "warp-custom-windows-2025-x64-16x-ondemand"
+const windows16xSpot: String = "warp-custom-windows-2025-x64-16x"
+
+const linux4x: String = "${{ \(onDemandSource) && '\(linux4xOnDemand)' || '\(linux4xSpot)' }}"
+const windows16x: String = "${{ \(onDemandSource) && '\(windows16xOnDemand)' || '\(windows16xSpot)' }}"
+
+const labels: List<String> = List(linux4xSpot, linux4xOnDemand, windows16xSpot, windows16xOnDemand)

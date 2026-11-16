@@ -28,7 +28,70 @@ This repo uses `pnpm` and explicitly rejects `npm`.
 - `src/export-github-org-snapshot.ts`: export current org settings into editable baseline JSON shape
 - `package.json`: build/run scripts
 
-## Setup
+## Shared workflow generation
+
+`ci/workflows/` contains Pkl modules and Python tools adapted from `agent`'s
+workflow renderer. The shared parts cover checkout steps, BYOC runner labels,
+trigger construction, YAML rendering, actionlint/ShellCheck, and OpenTofu
+configuration discovery. The original `agent` repository is unchanged.
+Pkl 0.32.1, yamlfmt 0.21.0, actionlint 1.7.12 and ShellCheck 0.11.0 are pinned
+with release-asset SHA-256 checksums in `ci/workflows/tools.json`. Python 3.10+
+is required; no Python or Node packages are needed.
+Checkout is pinned to `actions/checkout@v7.0.1`; its Node 24 runtime requires
+[Actions Runner 2.327.1 or newer](https://github.com/actions/checkout#checkout-v5).
+
+Refresh a consumer from this checkout:
+
+```bash
+python3 scripts/sync-workflows.py --repo ../muse-platform
+../muse-platform/scripts/render-workflows.sh
+../muse-platform/scripts/render-workflows.sh --check --lint
+```
+
+The export writes `.github/vendor/platform-tools/` and a content lock listing
+each file's checksum. Commit that snapshot with the consumer's Pkl and YAML.
+It is the consumer's dependency pin, so changes here take effect only after
+an explicit refresh. This works before a shared package release is published
+and does not need a cross-repository token in CI. Edit the library here, then
+refresh; do not edit the consumer's snapshot. `sync-workflows.py --check`
+reports whether a consumer matches this checkout.
+
+A consumer owns `.github/index.pkl`, which maps Pkl outputs to paths relative
+to `.github/`. Its `.github/pkl/opentofu.pkl` amends the exported
+`pkl/opentofu.pkl`; configuration root, version file, version-check command,
+trigger paths, and push branches are configurable there. Only outputs in
+the index are generated. Files with the generated banner that leave the
+index are removed on render and reported as stale by `--check`.
+
+The OpenTofu recipe creates one job. It checks out once, restores a shared
+provider/tool cache, checks generated YAML, lints workflows, and discovers
+tracked `.tf`, `.tf.json`, `.tofu` and `.tofu.json` directories. Stage new
+configuration files before local discovery. Downloaded `.terraform/` modules
+are excluded. Every discovered directory is initialized with the backend
+disabled and validated; a directory with tracked `tests/*.tftest.hcl` files
+also runs `tofu test`. Failures are collected across directories and written
+to the job summary. Tests must supply mocks or otherwise be safe to run in
+this validation job, which supplies no cloud credentials.
+
+`--check` renders to a temporary directory and compares committed outputs.
+It caches a successful check by the contents of the shared bundle, the
+consumer's `.github/` Pkl/JSON/YAML, and its render wrapper. Unchanged inputs
+and outputs reuse that result; edits to generated YAML invalidate it too.
+Keep workflow rendering inputs under `.github/`. Rendering writes YAML for a
+future workflow run; it does not change a workflow already executing.
+
+Check the shared tools with:
+
+```bash
+python3 -m unittest discover -s ci/tests -v
+python3 ci/tests/smoke_workflows.py
+```
+
+The smoke check exports a fresh consumer, renders with the pinned tools,
+lints its workflow, and verifies that edited or stale outputs fail checking.
+`.github/workflows/shared-workflows.yml` runs both checks in one job.
+
+## CLI setup
 
 Install dependencies:
 

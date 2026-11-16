@@ -1,0 +1,6 @@
+/// Shared action versions used by generated workflows.
+module platform.workflows.steps.actions
+
+const checkout: String = "actions/checkout@v7.0.1"
+const cache: String = "actions/cache@v4"
+const setupOpenTofu: String = "opentofu/setup-opentofu@v1"

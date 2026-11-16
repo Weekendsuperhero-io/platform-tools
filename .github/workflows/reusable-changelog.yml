@@ -123,6 +123,7 @@ jobs:
 
     permissions:
       contents: write
+      checks: write
 
     steps:
       - name: Validate GitHub App secret configuration
@@ -493,6 +494,7 @@ jobs:
 
       - name: Create Pull Request
         if: steps.changes.outputs.skip != 'true' && steps.watch.outputs.enabled != 'true'
+        id: cpr
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ steps.app-token.outputs.token || github.token }}
@@ -505,6 +507,16 @@ jobs:
           base: ${{ steps.changes.outputs.base_branch }}
           add-paths: ${{ steps.paths.outputs.add_paths }}
 
+      - name: Show run on the pull request
+        if: steps.cpr.outputs.pull-request-head-sha != ''
+        uses: weekendsuperhero-io/platform-tools/.github/actions/report-pr-check@main
+        with:
+          name: Muse changelog
+          head_sha: ${{ steps.cpr.outputs.pull-request-head-sha }}
+          conclusion: success
+          title: Changelog PR opened
+          summary: Changelog entries from `${{ steps.changes.outputs.base_branch }}`.
+
   apply:
     name: Apply changelog
     if: inputs.mode == 'apply'
@@ -512,6 +524,7 @@ jobs:
     permissions:
       contents: write
       actions: read
+      checks: write
     steps:
       - name: Validate watch outcome
         env:
@@ -674,6 +687,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create Pull Request
+        id: cpr
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ steps.app-token.outputs.token || github.token }}
@@ -685,3 +699,13 @@ jobs:
           branch: "${{ steps.paths.outputs.prefix }}${{ inputs.start-run-id }}"
           base: ${{ steps.ticket.outputs.base_branch }}
           add-paths: ${{ steps.paths.outputs.add_paths }}
+
+      - name: Show run on the pull request
+        if: always() && steps.cpr.outputs.pull-request-head-sha != ''
+        uses: weekendsuperhero-io/platform-tools/.github/actions/report-pr-check@main
+        with:
+          name: Muse changelog
+          head_sha: ${{ steps.cpr.outputs.pull-request-head-sha }}
+          conclusion: ${{ job.status == 'success' && 'success' || job.status == 'cancelled' && 'cancelled' || 'failure' }}
+          title: Changelog PR opened
+          summary: Changelog entries from `${{ steps.ticket.outputs.base_branch }}`.
