@@ -47,7 +47,7 @@ function timingSafeEqual(a: string, b: string): boolean {
 
 function ticketKey(t: Pick<Ticket, "repo" | "pr" | "agent" | "event_type" | "start_run_id">): string {
   if (t.agent) return `pr:${t.repo}:${t.pr}:${t.agent}`;
-  if (t.event_type === "muse-changelog-ready") {
+  if (t.event_type === "muse-changelog-ready" || t.event_type === "hero-changelog-ready") {
     return `changelog:${t.repo}:${t.start_run_id}`;
   }
   return `pr:${t.repo}:${t.pr}`;
@@ -130,7 +130,10 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
 
   const body = await req.text();
   const expected = await hmacHex(secret, body);
-  const got = (req.headers.get("x-muse-signature") ?? "").trim().toLowerCase();
+  // Either header name carries the same HMAC: senders move to the new one later.
+  const got = (req.headers.get("x-hero-signature") ?? req.headers.get("x-muse-signature") ?? "")
+    .trim()
+    .toLowerCase();
   if (!timingSafeEqual(expected, got)) {
     return new Response("unauthorized", { status: 401 });
   }
