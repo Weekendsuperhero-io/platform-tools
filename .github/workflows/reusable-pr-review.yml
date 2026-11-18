@@ -123,7 +123,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
         run: |
+          # Loop labels in both spellings: the labels are renamed in place
+          # later, and a round in flight may hold either.
           for label in "muse:reviewing" "muse:approved" "muse:error" \
+                       "hero:reviewing" "hero:approved" "hero:error" \
                        "review:approved" "review:needs-changes" \
                        "security:clear" "security:flagged" \
                        "tests:sufficient" "tests:needs-work"; do
@@ -138,7 +141,8 @@ jobs:
       inputs.mode != 'apply'
       && github.event.action == 'labeled'
       && (github.event.label.name == inputs.trigger-label
-          || github.event.label.name == inputs.force-label)
+          || github.event.label.name == inputs.force-label
+          || contains(fromJSON('["muse:review","muse:force","hero:review","hero:force"]'), github.event.label.name))
     runs-on: ${{ inputs.runs-on }}
     permissions:
       contents: read
@@ -205,11 +209,19 @@ jobs:
           gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label "$PRESSED" 2>/dev/null || true
 
           create() { gh label create "$1" --repo "$GITHUB_REPOSITORY" --color "$2" --description "$3" --force >/dev/null 2>&1 || true; }
-          create "muse:review"          "ededed" "Request a Muse review round (re-add to re-run)"
-          create "muse:force"           "ededed" "Force a Muse round even if this SHA was already reviewed"
-          create "muse:reviewing"       "fbca04" "Muse review round in progress"
-          create "muse:approved"        "0e8a16" "All Muse review agents positive"
-          create "muse:error"           "b60205" "A Muse review agent failed — see workflow run"
+          # A loop label is created only while its other spelling does not
+          # exist: once the labels are renamed in place, creating the old name
+          # again would bring back a second set.
+          EXISTING=$(gh label list --repo "$GITHUB_REPOSITORY" --limit 500 --json name --jq '.[].name' 2>/dev/null || true)
+          create_loop() {
+            if printf '%s\n' "$EXISTING" | grep -qxF "hero:$1"; then return 0; fi
+            create "muse:$1" "$2" "$3"
+          }
+          create_loop "review"    "ededed" "Request a Muse review round (re-add to re-run)"
+          create_loop "force"     "ededed" "Force a Muse round even if this SHA was already reviewed"
+          create_loop "reviewing" "fbca04" "Muse review round in progress"
+          create_loop "approved"  "0e8a16" "All Muse review agents positive"
+          create_loop "error"     "b60205" "A Muse review agent failed — see workflow run"
           create "review:approved"       "0e8a16" "Muse code review: no blocking findings"
           create "review:needs-changes"  "d93f0b" "Muse code review: blocking findings open"
           create "security:clear"        "0e8a16" "Muse security review: no blocking findings"
@@ -235,7 +247,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           AGENTS: ${{ inputs.agents }}
-          FORCED: ${{ github.event.label.name == inputs.force-label }}
+          FORCED: ${{ github.event.label.name == inputs.force-label || github.event.label.name == 'muse:force' || github.event.label.name == 'hero:force' }}
         run: |
           set -euo pipefail
           mkdir -p context
@@ -268,10 +280,11 @@ jobs:
               tests)    POS="tests:sufficient" ;;
             esac
 
-            BODY=$(jq -r --arg m "<!-- muse:${a} sha:" '[.[] | select(.body | contains($m))] | last | .body // empty' /tmp/all_comments.json)
-            SHA=$(printf '%s' "$BODY" | grep -oE "<!-- muse:${a} sha:[0-9a-f]+" | grep -oE '[0-9a-f]{7,}' | head -1 || true)
+            # Either marker prefix: comments written before and after the rename.
+            BODY=$(jq -r --arg m "<!-- muse:${a} sha:" --arg h "<!-- hero:${a} sha:" '[.[] | select((.body | contains($m)) or (.body | contains($h)))] | last | .body // empty' /tmp/all_comments.json)
+            SHA=$(printf '%s' "$BODY" | grep -oE "<!-- (muse|hero):${a} sha:[0-9a-f]+" | grep -oE '[0-9a-f]{7,}' | head -1 || true)
             ROUND=$(printf '%s' "$BODY" | grep -oE "round:[0-9]+" | head -1 | cut -d: -f2 || true)
-            STATE=$(printf '%s' "$BODY" | grep -oE "<!-- muse:${a}:state [A-Za-z0-9+/=]+" | awk '{print $3}' || true)
+            STATE=$(printf '%s' "$BODY" | grep -oE "<!-- (muse|hero):${a}:state [A-Za-z0-9+/=]+" | awk '{print $3}' || true)
 
             if [ -n "$STATE" ] && printf '%s' "$STATE" | base64 -d 2>/dev/null | jq -e 'type == "array"' > /dev/null 2>&1; then
               printf '%s' "$STATE" | base64 -d > "context/prev_${a}.json"
@@ -308,7 +321,10 @@ jobs:
           # github.token, never the app token — see "Re-arm trigger" above.
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
-        run: gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "muse:reviewing"
+        # The label under whichever spelling the repo has.
+        run: |
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "muse:reviewing" 2>/dev/null \
+            || gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "hero:reviewing"
 
       - name: Gather shared context
         if: steps.state.outputs.skip != 'true'
@@ -399,7 +415,7 @@ jobs:
 
           # Human discussion (agents see pushback/decisions); our own sticky
           # comments are excluded.
-          jq -r '[.[] | select(.body | contains("<!-- muse:") | not)] | .[-15:] | .[] |
+          jq -r '[.[] | select(((.body | contains("<!-- muse:")) or (.body | contains("<!-- hero:"))) | not)] | .[-15:] | .[] |
                  "@\(.user.login) (\(.created_at)):\n\(.body[0:1500])\n---"' \
             /tmp/all_comments.json > context/comments.txt || : > context/comments.txt
 
@@ -704,7 +720,8 @@ jobs:
           esac
           gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "$NEG" 2>/dev/null || true
           gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label "$POS" 2>/dev/null || true
-          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "muse:error" 2>/dev/null || true
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "muse:error" 2>/dev/null \
+            || gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "hero:error" 2>/dev/null || true
 
       - name: Roll up labels if the round is complete
         env:
@@ -750,9 +767,13 @@ jobs:
 
           add()    { gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "$1" 2>/dev/null || true; }
           remove() { gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label "$1" 2>/dev/null || true; }
-          if [ "$ERROR" = "true" ]; then add "muse:error"; else remove "muse:error"; fi
-          if [ "$ALL_POSITIVE" = "true" ]; then add "muse:approved"; else remove "muse:approved"; fi
-          remove "muse:reviewing"
+          # Loop labels exist under one spelling per repo: add whichever is
+          # there, and remove both.
+          add_loop()    { gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "muse:$1" 2>/dev/null || add "hero:$1"; }
+          remove_loop() { remove "muse:$1"; remove "hero:$1"; }
+          if [ "$ERROR" = "true" ]; then add_loop "error"; else remove_loop "error"; fi
+          if [ "$ALL_POSITIVE" = "true" ]; then add_loop "approved"; else remove_loop "approved"; fi
+          remove_loop "reviewing"
           echo "Round complete"
 
       - name: Fail on Jules error
@@ -848,7 +869,11 @@ jobs:
             fi
           done
 
-          if [ "$ERROR" = "true" ]; then add "muse:error"; else remove "muse:error"; fi
-          if [ "$ALL_POSITIVE" = "true" ]; then add "muse:approved"; else remove "muse:approved"; fi
-          remove "muse:reviewing"
+          # Loop labels exist under one spelling per repo: add whichever is
+          # there, and remove both.
+          add_loop()    { gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "muse:$1" 2>/dev/null || add "hero:$1"; }
+          remove_loop() { remove "muse:$1"; remove "hero:$1"; }
+          if [ "$ERROR" = "true" ]; then add_loop "error"; else remove_loop "error"; fi
+          if [ "$ALL_POSITIVE" = "true" ]; then add_loop "approved"; else remove_loop "approved"; fi
+          remove_loop "reviewing"
           echo "Round complete"

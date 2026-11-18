@@ -120,8 +120,10 @@ runs:
           echo "<!-- muse:${AGENT}:state ${STATE_B64} -->"
         } > /tmp/body.md
 
-        CID=$(jq -r --arg m "<!-- muse:${AGENT} sha:" \
-          '[.[] | select(.body | contains($m))] | last | .id // empty' \
+        # Either marker prefix, last match: the comment to edit may have been
+        # written before or after the rename.
+        CID=$(jq -r --arg m "<!-- muse:${AGENT} sha:" --arg h "<!-- hero:${AGENT} sha:" \
+          '[.[] | select((.body | contains($m)) or (.body | contains($h)))] | last | .id // empty' \
           <(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate --jq '.[]' | jq -s '.'))
         if [ -n "$CID" ]; then
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$CID" -F body=@/tmp/body.md > /dev/null

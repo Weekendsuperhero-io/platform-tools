@@ -6,7 +6,7 @@ name: Generate Changelog PR
 on:
   workflow_dispatch:
   repository_dispatch:
-    types: [muse-changelog-ready]
+    types: [muse-changelog-ready, hero-changelog-ready]
 
 jobs:
   update-changelog:
