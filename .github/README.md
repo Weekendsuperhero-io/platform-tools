@@ -6,95 +6,12 @@ This directory contains reusable workflows that can be called from other reposit
 
 | Workflow       | File                          | Purpose                                                  |
 | -------------- | ----------------------------- | -------------------------------------------------------- |
-| PR Description | `reusable-pr-description.yml` | Auto-generates PR titles and descriptions using Jules AI |
-| Changelog      | `reusable-changelog.yml`      | Auto-generates changelog entries and creates a PR        |
 | Rust CI        | `reusable-rust-ci.yml`        | Shared Rust CI checks, docs, and optional target builds  |
 | Rust Release   | `reusable-rust-release.yml`   | Shared Rust release validation, packaging, release, and crates publish |
 
 ## Quick Start
 
-### 1. PR Description Generator
-
-Add this to your consuming repo at `.github/workflows/pr-description.yml`:
-
-```yaml
-name: Update PR Description
-
-on:
-  pull_request:
-    types: [opened, edited]
-  repository_dispatch:
-    types: [muse-pr-description-ready]
-
-jobs:
-  update-pr:
-    permissions:
-      contents: read
-      pull-requests: write
-      actions: read
-      checks: write
-    uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-pr-description.yml@main
-    with:
-      trigger-phrase: "@agent pr-title" # optional — only runs if this phrase is in the PR body
-      mode: ${{ github.event_name == 'repository_dispatch' && 'apply' || 'start' }}
-      session-id: ${{ github.event.client_payload.session_id || '' }}
-      pr-number: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.pr || 0 }}
-      outcome: ${{ github.event.client_payload.outcome || '' }}
-      start-run-id: ${{ github.event.client_payload.start_run_id || '' }}
-      watch-url: ${{ vars.MUSE_WATCH_URL }}
-    secrets: inherit
-```
-
-**How it works:**
-
-- When a PR is opened/edited with `@agent pr-title` in the body, the workflow:
-  1. Diffs the PR against its base branch
-  2. Sends the diff + commit messages to Jules AI
-  3. Updates the PR with a structured title and description
-- If the PR body doesn't contain the trigger phrase, the workflow skips
-- **Async watch (optional):** deploy [`watch/`](../watch/README.md), store one org-owned fine-grained PAT (all org repos, Contents: write — required for repository_dispatch) on the Worker, and set org variable `MUSE_WATCH_URL` + org secret `MUSE_WATCH_HMAC`. Every consumer that copies the wrapper above then parks the runner after session create; muse-watch `repository_dispatch`es that same repo when Jules is done. Omit the URL/HMAC and the job still polls in-process (the old behaviour). Repos outside the org are not covered by that PAT.
-
-### 2. Changelog Generator
-
-Add this to your consuming repo at `.github/workflows/changelog.yml`:
-
-```yaml
-name: Update Changelog
-
-on:
-  workflow_dispatch: # manual trigger
-  repository_dispatch:
-    types: [muse-changelog-ready]
-  # schedule:
-  #   - cron: "0 0 * * 1"  # every Monday (optional)
-
-jobs:
-  changelog:
-    permissions:
-      contents: write
-      actions: read
-      checks: write
-    uses: weekendsuperhero-io/platform-tools/.github/workflows/reusable-changelog.yml@main
-    with:
-      changelog-path: CHANGELOG.md
-      pr-branch-prefix: "chore/changelog-"
-      mode: ${{ github.event_name == 'repository_dispatch' && 'apply' || 'start' }}
-      session-id: ${{ github.event.client_payload.session_id || '' }}
-      outcome: ${{ github.event.client_payload.outcome || '' }}
-      start-run-id: ${{ github.event.client_payload.start_run_id || '' }}
-      base-branch: ${{ github.event.client_payload.base_branch || github.ref_name }}
-    secrets: inherit
-```
-
-**How it works:**
-
-- Finds the last commit that touched `CHANGELOG.md` on the branch you ran the workflow from
-- Collects all commits since then
-- Sends full commit messages (subject + body) to Jules AI to generate changelog entries
-- Inserts entries under `## [Unreleased]` (Keep a Changelog format)
-- Creates a PR **against that same branch** (not always `main`). Run from `beta` to land changelog fixes on `beta`.
-
-### 3. Rust CI (Reusable)
+### 1. Rust CI (Reusable)
 
 Add this to your consuming repo at `.github/workflows/ci.yml`:
 
@@ -135,7 +52,7 @@ jobs:
         ]
 ```
 
-### 4. Rust Release (Reusable)
+### 2. Rust Release (Reusable)
 
 Add this to your consuming repo at `.github/workflows/release.yml`:
 
@@ -174,35 +91,6 @@ jobs:
 ```
 
 ## Configuration Options
-
-### PR Description Workflow
-
-| Input                   | Default                                            | Description                                        |
-| ----------------------- | -------------------------------------------------- | -------------------------------------------------- |
-| `trigger-phrase`        | `@agent pr-title`                                  | Phrase required in PR body to trigger the workflow |
-| `base-branch`           | _(auto-detect)_                                    | Branch to diff against                             |
-| `diff-file-patterns`    | `*.rs *.ts *.tsx *.toml *.sql *.yml *.sh *.css`    | File patterns to include in diff                   |
-| `diff-exclude-patterns` | `:!pnpm-lock.yaml :!Cargo.lock :!**/bindings/*.ts` | Patterns to exclude                                |
-| `max-diff-lines`        | `4000`                                             | Max lines of code diff to send                     |
-| `max-commit-messages`   | `30`                                               | Max commit messages to include                     |
-| `custom-prompt`         | _(built-in)_                                       | Override the Jules prompt entirely                 |
-
-### Changelog Workflow
-
-| Input                   | Default                     | Description                                      |
-| ----------------------- | --------------------------- | ------------------------------------------------ |
-| `changelog-path`        | `CHANGELOG.md`              | Path to your changelog file                      |
-| `pr-branch-prefix`      | `chore/update-changelog`    | Prefix for the generated PR branch               |
-| `base-branch`           | _(invoking branch)_         | Branch to collect commits from and open the PR against |
-| `max-commit-messages`   | `50`                        | Max full commit messages (subject + body) to include |
-| `diff-file-patterns`    | _(legacy)_                  | Deprecated and ignored (kept for compatibility)  |
-| `diff-exclude-patterns` | _(legacy)_                  | Deprecated and ignored (kept for compatibility)  |
-| `max-diff-lines`        | `4000`                      | Deprecated and ignored (kept for compatibility)  |
-| `fallback-commit-count` | `20`                        | Commits to use when no previous changelog entry  |
-| `unreleased-heading`    | `## [Unreleased]`           | The heading to insert entries under              |
-| `custom-prompt`         | _(built-in)_                | Override the Jules prompt                        |
-| `pr-title`              | `docs: update CHANGELOG.md` | Title for the generated PR                       |
-| `pr-body-template`      | _(auto)_                    | Body template (`{0}` is interpolated)            |
 
 ### Rust CI Workflow
 
@@ -254,16 +142,6 @@ jobs:
 
 ## Required Secrets
 
-Jules workflows require:
-
-| Secret          | Required | Description                                             |
-| --------------- | -------- | ------------------------------------------------------- |
-| `JULES_API_KEY` | Yes      | API key for Jules AI                                    |
-| `JULES_PR_CLIENT_ID` | Optional | GitHub App ID / client ID for Jules PR automation |
-| `JULES_PR_PRIVATE_KEY` | Optional | GitHub App private key PEM (must be set with `JULES_PR_CLIENT_ID`) |
-
-Add `JULES_API_KEY` to your repo's **Settings → Secrets and variables → Actions**.
-
 Rust release workflow requires:
 
 | Secret                  | Required | Description                                            |
@@ -275,63 +153,24 @@ Rust release workflow requires:
 Caller workflows can either pass named secrets explicitly (`secrets: { ... }`) or use `secrets: inherit`.
 `secrets: inherit` is set in the caller job that uses the reusable workflow and is supported for repositories in the same organization or enterprise.
 `GITHUB_TOKEN` is automatically available to workflows via `github.token`; no explicit secret declaration is required in the reusable workflow.
-For GitHub App auth, workflows use `JULES_PR_CLIENT_ID` + `JULES_PR_PRIVATE_KEY`.
+For GitHub App auth, the release workflow uses `JULES_PR_CLIENT_ID` + `JULES_PR_PRIVATE_KEY`. The names are left from the retired Jules bot; the App they identify creates the GitHub Release.
 Client secret alone is not sufficient; you need the app private key.
-GitHub App permissions for PR description/changelog automation: `Pull requests: Read and write`; add `Contents: Read and write` when creating commit branches/PRs (for changelog), and at least `Contents: Read` for checkout operations with app token.
-When GitHub App auth is used in changelog workflow, commits are authored/committed as `<app-slug>[bot] <id+app-slug[bot]@users.noreply.github.com>`.
 Permissions are separate from secrets: set explicit `permissions` in both caller and reusable workflows for least privilege.
-`checks: write` lets apply (and the in-process changelog job) post a check run on the PR head so `repository_dispatch` / `workflow_dispatch` runs show in the PR Checks tab, not only under Actions.
-These reusable workflows intentionally do not request `pull-requests: write` for `GITHUB_TOKEN`; PR updates should run through the configured GitHub App token.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
   subgraph Consuming["Consuming Repository"]
-    C1[".github/workflows/pr-description.yml"]
-    C2[".github/workflows/changelog.yml"]
     C3[".github/workflows/ci.yml"]
     C4[".github/workflows/release.yml"]
   end
 
   subgraph Source["Source Repository"]
-    R1[".github/workflows/reusable-pr-description.yml"]
-    R2[".github/workflows/reusable-changelog.yml"]
     R3[".github/workflows/reusable-rust-ci.yml"]
     R4[".github/workflows/reusable-rust-release.yml"]
-    A1[".github/actions/jules-ai/action.yml (composite)"]
   end
 
-  C1 -- workflow_call --> R1
-  C2 -- workflow_call --> R2
   C3 -- workflow_call --> R3
   C4 -- workflow_call --> R4
-
-  R1 --> A1
-  R2 --> A1
 ```
-
-## Troubleshooting
-
-**Workflow doesn't trigger:**
-
-- For PR description: ensure the trigger phrase appears in the PR body
-- For changelog: ensure you're triggering `workflow_dispatch` or the schedule
-
-**Jules returns plain text instead of JSON (PR workflow):**
-
-- The workflow falls back to using the raw text as the description — this is expected
-
-**"No output from Jules" error:**
-
-- Check that `JULES_API_KEY` is set correctly
-- Check Jules API status / rate limits
-
-**Changelog entries appear in wrong place:**
-
-- Ensure your changelog has the exact `## [Unreleased]` heading (or configure `unreleased-heading`)
-
-**Changelog PR opened against `main` instead of `beta`:**
-
-- Run the workflow *from* that branch (Actions → Run workflow → Use workflow from `beta`, or `gh workflow run … --ref beta`). `create-pull-request` used to default `base` to the repo default branch; the reusable now persists the invoking ref and opens the PR against it.
-- Apply still listens on the default-branch workflow file. That is expected; the PR target comes from the start run, not from apply's `github.ref`.
